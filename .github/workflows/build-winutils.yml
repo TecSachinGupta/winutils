@@ -40,16 +40,24 @@ jobs:
         with:
           maven-version: 3.9.6
 
-      - name: Set up MSBuild (for native code)
-        uses: microsoft/setup-msbuild@v1.1
-
       - name: Set up MSVC build tools
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Add Python and CMake
-        run: |
-          choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
-          choco install python --pre -y
+      - name: Set up Visual Studio Build Tools
+        uses: microsoft/setup-msbuild@v1.3.1
+
+      - name: Install CMake
+        uses: lukka/get-cmake@v3.27.1
+
+      - name: Install Protocol Buffers
+      run: |
+        choco install protoc -y
+        protoc --version
+
+    - name: Install Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
         #refreshenv
 
       - name: Build Hadoop native binaries
