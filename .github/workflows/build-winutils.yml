@@ -4,114 +4,64 @@ on:
   workflow_dispatch:
     inputs:
       hadoop_version:
-        description: 'Hadoop version (e.g. 3.4.1)'
+        description: 'Comma-separated list of Hadoop versions (e.g., 3.3.6,3.4.1)'
         required: true
         default: '3.4.1'
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Set matrix from input
+        id: set-matrix
+        run: |
+          versions="${{ github.event.inputs.hadoop_versions }}"
+          versions_json=$(echo "$versions" | jq -R 'split(",") | map(gsub("^\\s+|\\s+$"; ""))')
+          echo "matrix={\"version\": $versions_json}" >> "$GITHUB_OUTPUT"
+        shell: bash
+  
   build:
+    needs: prepare
     runs-on: windows-latest
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
 
     steps:
-      # Set environment variables
+      - name: Echo Hadoop version
+        run: echo "Building For Hadoop ${{ matrix.version }}"
+        
       - name: Set variables
         run: |
-          echo "RELEASE_TAG=rel/release-${{ github.event.inputs.hadoop_version }}" >> $env:GITHUB_ENV
-          echo "DIST_VERSION=hadoop-${{ github.event.inputs.hadoop_version }}" >> $env:GITHUB_ENV
-      
-      - name: Install Git (for Bash)
-        run: choco install git -y
+          echo "RELEASE_TAG=rel/release-${{ matrix.version }}" >> $env:GITHUB_ENV
+          echo "DIST_VERSION=hadoop-${{ matrix.version }}" >> $env:GITHUB_ENV
 
-      # Enable long paths in Git
-      - name: Enable long paths
-        run: git config --system core.longpaths true
-
-      # Setup Java (depends on version of Hadoop)
-      - name: Set up Java 8 (Temurin)
-        uses: actions/setup-java@v3
-        with:
-          distribution: temurin
-          java-version: 8
-          
-      - name: Cache Maven dependencies
-        uses: actions/cache@v3
-        with:
-          path: ~/.m2/repository
-          key: maven-${{ runner.os }}-${{ hashFiles('**/pom.xml') }}
-          restore-keys: maven-${{ runner.os }}-
-
-      # Setup Maven
-      - name: Set up Maven
-        uses: stCarolas/setup-maven@v4
-        with:
-          maven-version: 3.9.6
-
-      # Setup Visual Studio and MSVC
-      - name: Set up MSVC build tools
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          vs-version: '2019'
-
-      - name: Set up Visual Studio Build Tools
-        uses: microsoft/setup-msbuild@v1.3.1
-
-      # Install CMake
-      - name: Install CMake
-        uses: lukka/get-cmake@v3.27.1
-
-      # Install Protocol Buffers (protoc)
-      - name: Install Protocol Buffers
+      - name: Set up Dependencies (Java, CMake etc.)
         run: |
-          choco install protoc -y
-          echo "C:\Program Files\protoc\bin" >> $GITHUB_PATH
+          choco install -y maven openjdk11 git winflexbison3 cmake protoc ninja
+          echo "JAVA_HOME=C:\Program Files\OpenJDK\openjdk-11" >> $env:GITHUB_ENV
+          echo "$env:ChocolateyInstall\\bin" >> $env:GITHUB_PATH
+          echo "C:\Program Files\protoc\bin" >> $env:GITHUB_PATH
+          echo "$env:JAVA_HOME\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
-      # Install Python
       - name: Install Python 3
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
-      - name: Install Ninja
-        run: |
-          choco install ninja -y
-          echo "$env:ChocolateyInstall\\bin" >> $env:GITHUB_PATH
+      - name: Add msbuild to PATH
+        uses: microsoft/setup-msbuild@v2
+        # with:
+        #   vs-version: '[16.4,16.5)'
 
-      - name: Build zlib from source
-        run: |
-          git clone https://github.com/madler/zlib.git
-          cd zlib
-          mkdir build
-          cd build
-          cmake .. -G "Ninja" -DCMAKE_INSTALL_PREFIX=C:/zlib
-          ninja
-          ninja install
-          echo "C:/zlib/bin" >> $GITHUB_PATH
-      
-      - name: Build Snappy with Ninja
-        shell: bash
-        run: |
-          git clone https://github.com/google/snappy.git
-          cd snappy
-          mkdir build && cd build
-      
-          # Configure CMake with Ninja, skipping tests & benchmarks
-          cmake .. -G "Ninja" \
-            -DCMAKE_INSTALL_PREFIX="C:/snappy" \
-            -DSNAPPY_BUILD_TESTS=OFF \
-            -DSNAPPY_BUILD_BENCHMARKS=OFF || exit 1
-      
-          # Ensure build.ninja was generated
-          if [ ! -f build.ninja ]; then
-            echo "❌ CMake configuration failed: build.ninja missing"
-            exit 1
-          fi
-      
-          # Compile and install binaries
-          ninja
-          ninja install
-      
-          # Add installed bin directory to PATH
-          echo "C:/snappy/bin" >> $GITHUB_PATH
+      - name: Cache Maven repository
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: maven-cache-${{ matrix.version }}
+          restore-keys: |
+            maven-cache-
 
       - name: Debug PATH and Java version
         shell: bash
@@ -122,35 +72,15 @@ jobs:
           where bash
           where protoc || echo "protoc not found"
 
-      # Clone specific Hadoop version
-      - name: Checkout Hadoop
+      - name: Checkout Hadoop Source Code
         uses: actions/checkout@v3
         with:
           repository: apache/hadoop
           ref: ${{ env.RELEASE_TAG }}
           path: hadoop
 
-      # Build Hadoop native binaries
       - name: Build Hadoop native binaries
         shell: cmd
         run: |
           cd hadoop
           mvn clean install -Pdist,native -DskipTests -Dtar -e -X
-
-      # List the final artifacts
-      - name: List built binaries
-        shell: bash
-        run: |
-          dir hadoop\hadoop-dist\target\${{ env.DIST_VERSION }}\bin
-          dir hadoop\hadoop-dist\target\${{ env.DIST_VERSION }}\lib
-          dir hadoop\hadoop-dist\target\${{ env.DIST_VERSION }}\lib\native
-
-      # Upload everything from dist folder
-      - name: Upload all native artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.DIST_VERSION }}-native-windows
-          path: |
-            hadoop/hadoop-dist/target/${{ env.DIST_VERSION }}/bin/**
-            hadoop/hadoop-dist/target/${{ env.DIST_VERSION }}/lib/**
-            hadoop/hadoop-dist/target/${{ env.DIST_VERSION }}/lib/native/**
