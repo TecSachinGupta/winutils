@@ -87,15 +87,30 @@ jobs:
           ninja install
           echo "C:/zlib/bin" >> $GITHUB_PATH
       
-      - name: Build Snappy from source
+      - name: Build Snappy with Ninja
+        shell: bash
         run: |
           git clone https://github.com/google/snappy.git
           cd snappy
-          mkdir build
-          cd build
-          cmake .. -G "Ninja" -DCMAKE_INSTALL_PREFIX=C:/snappy
+          mkdir build && cd build
+      
+          # Configure CMake with Ninja, skipping tests & benchmarks
+          cmake .. -G "Ninja" \
+            -DCMAKE_INSTALL_PREFIX="C:/snappy" \
+            -DSNAPPY_BUILD_TESTS=OFF \
+            -DSNAPPY_BUILD_BENCHMARKS=OFF || exit 1
+      
+          # Ensure build.ninja was generated
+          if [ ! -f build.ninja ]; then
+            echo "❌ CMake configuration failed: build.ninja missing"
+            exit 1
+          fi
+      
+          # Compile and install binaries
           ninja
           ninja install
+      
+          # Add installed bin directory to PATH
           echo "C:/snappy/bin" >> $GITHUB_PATH
 
       - name: Debug PATH and Java version
