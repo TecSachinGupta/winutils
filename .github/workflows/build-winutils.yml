@@ -26,14 +26,6 @@ jobs:
       - name: Enable long paths
         run: git config --system core.longpaths true
 
-      # Clone specific Hadoop version
-      - name: Checkout Hadoop
-        uses: actions/checkout@v3
-        with:
-          repository: apache/hadoop
-          ref: ${{ env.RELEASE_TAG }}
-          path: hadoop
-
       # Setup Java (depends on version of Hadoop)
       - name: Set up Java 8 (Temurin)
         uses: actions/setup-java@v3
@@ -72,17 +64,36 @@ jobs:
         run: |
           choco install protoc -y
           echo "C:\Program Files\protoc\bin" >> $GITHUB_PATH
-      
-      - name: Install Native Dependencies
-        run: |
-          choco install zlib -y
-          choco install snappy -y
 
       # Install Python
       - name: Install Python 3
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
+
+      - name: Install Ninja
+        run: choco install ninja -y
+
+      - name: Build zlib from source
+        run: |
+          git clone https://github.com/madler/zlib.git
+          cd zlib
+          mkdir build
+          cd build
+          cmake .. -DCMAKE_INSTALL_PREFIX=C:/zlib
+          cmake --build . --config Release
+          echo "C:/zlib" >> $GITHUB_PATH
+      
+      - name: Build Snappy from source
+        run: |
+          git clone https://github.com/google/snappy.git
+          cd snappy
+          mkdir build
+          cd build
+          cmake .. -DCMAKE_INSTALL_PREFIX=C:/snappy
+          cmake --build . --config Release
+          echo "C:/snappy" >> $GITHUB_PATH
+
 
       - name: Debug PATH and Java version
         shell: bash
@@ -92,6 +103,14 @@ jobs:
           mvn -v
           where bash
           where protoc || echo "protoc not found"
+
+      # Clone specific Hadoop version
+      - name: Checkout Hadoop
+        uses: actions/checkout@v3
+        with:
+          repository: apache/hadoop
+          ref: ${{ env.RELEASE_TAG }}
+          path: hadoop
 
       # Build Hadoop native binaries
       - name: Build Hadoop native binaries
