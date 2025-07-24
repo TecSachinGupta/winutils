@@ -18,6 +18,7 @@ jobs:
         with:
           maven-version: 3.9.6
       - name: Build
+        shell: cmd
         run: |
           git checkout rel/release-3.4.1
           mvn clean install -Pdist,native -DskipTests -Dtar
