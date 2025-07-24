@@ -8,6 +8,10 @@ on:
         required: true
         default: '3.4.1'
 
+env:
+  # Default Hadoop versions for push/PR events
+  DEFAULT_HADOOP_VERSIONS: '3.3.6,3.4.1'
+
 jobs:
   prepare:
     runs-on: ubuntu-latest
@@ -17,10 +21,15 @@ jobs:
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Set matrix from input
+      - name: Set matrix from input or default
         id: set-matrix
         run: |
-          versions="${{ github.event.inputs.hadoop_version }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.hadoop_version }}" ]; then
+            versions="${{ github.event.inputs.hadoop_version }}"
+          else
+            versions="${{ env.DEFAULT_HADOOP_VERSIONS }}"
+          fi
+          
           clean_versions=$(echo "$versions" | jq -c -R 'split(",") | map(gsub("^\\s+|\\s+$"; ""))')
           echo "Parsed versions: $clean_versions"
           echo "matrix={\"version\":$clean_versions}" >> $GITHUB_OUTPUT
@@ -31,6 +40,7 @@ jobs:
     runs-on: windows-latest
     strategy:
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
 
     steps:
       - name: Echo Hadoop version
@@ -42,10 +52,11 @@ jobs:
           echo "DIST_VERSION=hadoop-${{ matrix.version }}" >> $env:GITHUB_ENV
 
       - name: Set up Java 11 (Temurin)
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 11
+          cache: maven
 
       - name: Install Python 3
         uses: actions/setup-python@v5
@@ -62,7 +73,7 @@ jobs:
           git config --system core.longpaths true
 
       - name: Checkout Hadoop Source Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           repository: apache/hadoop
           ref: ${{ env.RELEASE_TAG }}
@@ -71,10 +82,117 @@ jobs:
       - name: Build Hadoop Native Binaries
         shell: powershell
         run: |
-          # Locate Visual Studio vcvars64.bat
+          # Locate Visual Studio vcvars64.bat using vswhere
           $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vsPath = & $vsWhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
-          $vcVarsPath = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
-
+          if (Test-Path $vsWhere) {
+            $vsPath = & $vsWhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+            $vcVarsPath = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          } else {
+            # Fallback paths
+            $vcVarsPath = "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+            if (-not (Test-Path $vcVarsPath)) {
+              $vcVarsPath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+            }
+          }
+          
+          Write-Host "Using Visual Studio vcvars64.bat at: $vcVarsPath"
+          
           # Build using Maven with native profile
           cmd /c "`"$vcVarsPath`" && cd hadoop && mvn clean install -Pdist,native -DskipTests -Dtar -Dmaven.javadoc.skip=true"
+
+      - name: Verify native libraries
+        shell: powershell
+        run: |
+          Write-Host "Checking for native libraries..."
+          $nativeDir = "hadoop\hadoop-dist\target\${{ env.DIST_VERSION }}\lib\native"
+          
+          if (Test-Path $nativeDir) {
+            Write-Host "Native libraries found:"
+            Get-ChildItem -Path $nativeDir -Recurse -File | ForEach-Object {
+              Write-Host "  $($_.Name) - $($_.Length) bytes"
+            }
+          } else {
+            Write-Host "Native libraries directory not found at: $nativeDir"
+            Write-Host "Searching for available directories..."
+            if (Test-Path "hadoop\hadoop-dist\target") {
+              Get-ChildItem -Path "hadoop\hadoop-dist\target" -Directory -Recurse | Select-Object -First 10 | ForEach-Object {
+                Write-Host "  $($_.FullName)"
+              }
+            }
+          }
+
+      - name: Package native libraries and winutils
+        shell: powershell
+        run: |
+          $version = "${{ matrix.version }}"
+          $distDir = "hadoop\hadoop-dist\target\${{ env.DIST_VERSION }}"
+          $nativeDir = "$distDir\lib\native"
+          $binDir = "$distDir\bin"
+          $outputDir = "hadoop-$version-native-windows"
+          
+          # Create output directory
+          New-Item -ItemType Directory -Path $outputDir -Force
+          
+          $artifactsFound = $false
+          
+          # Copy native libraries if they exist
+          if (Test-Path $nativeDir) {
+            Write-Host "Copying native libraries..."
+            $libOutputDir = "$outputDir\lib\native"
+            New-Item -ItemType Directory -Path $libOutputDir -Force
+            Copy-Item -Path "$nativeDir\*" -Destination $libOutputDir -Recurse -Force
+            $artifactsFound = $true
+          }
+          
+          # Copy bin directory (including winutils.exe) if it exists
+          if (Test-Path $binDir) {
+            Write-Host "Copying bin directory (winutils, etc.)..."
+            $binOutputDir = "$outputDir\bin"
+            New-Item -ItemType Directory -Path $binOutputDir -Force
+            Copy-Item -Path "$binDir\*" -Destination $binOutputDir -Recurse -Force
+            $artifactsFound = $true
+          }
+          
+          # Create README with build info
+          $readme = @"
+Hadoop $version Native Binaries for Windows
+Build Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC')
+Source: Apache Hadoop $version (tag: ${{ env.RELEASE_TAG }})
+
+Contents:
+- lib/native/: Native libraries (.dll files)
+- bin/: Windows utilities including winutils.exe
+
+These binaries were built using:
+- Java 11 (Temurin)
+- Visual Studio 2022
+- Maven with -Pdist,native profile
+"@
+          
+          $readme | Out-File -FilePath "$outputDir\README.txt" -Encoding UTF8
+          
+          if (-not $artifactsFound) {
+            Write-Host "Warning: No native artifacts found, creating error report"
+            "Build completed but no native libraries or binaries were generated.`nCheck build logs for errors." | Out-File -FilePath "$outputDir\BUILD_ERROR.txt"
+          }
+          
+          # Create archive
+          Compress-Archive -Path $outputDir -DestinationPath "hadoop-$version-native-windows.zip" -Force
+          Write-Host "Package created: hadoop-$version-native-windows.zip"
+
+      - name: Upload native libraries artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hadoop-${{ matrix.version }}-native-windows
+          path: hadoop-${{ matrix.version }}-native-windows.zip
+          retention-days: 30
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-hadoop-${{ matrix.version }}
+          path: |
+            hadoop/**/*.log
+            hadoop/**/target/surefire-reports/
+          retention-days: 7
