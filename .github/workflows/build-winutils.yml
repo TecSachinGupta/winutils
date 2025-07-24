@@ -43,11 +43,14 @@ jobs:
       - name: Set up MSBuild (for native code)
         uses: microsoft/setup-msbuild@v1.1
 
+      - name: Set up MSVC build tools
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Build Hadoop native binaries
         shell: cmd
         run: |
           cd hadoop
-          mvn clean install -Pdist,native -DskipTests -Dtar
+          mvn clean install -Pdist,native -DskipTests -Dtar -X -e
 
       - name: List built binaries
         shell: cmd
