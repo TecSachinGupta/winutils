@@ -13,67 +13,74 @@ jobs:
     runs-on: windows-latest
 
     steps:
+      # Set environment variables
       - name: Set variables
-        id: vars
         run: |
-          echo "RELEASE_TAG=rel/release-${{ github.event.inputs.hadoop_version }}" >> $GITHUB_ENV
-          echo "DIST_VERSION=hadoop-${{ github.event.inputs.hadoop_version }}" >> $GITHUB_ENV
+          echo "RELEASE_TAG=rel/release-${{ github.event.inputs.hadoop_version }}" >> $env:GITHUB_ENV
+          echo "DIST_VERSION=hadoop-${{ github.event.inputs.hadoop_version }}" >> $env:GITHUB_ENV
 
+      # Enable long paths in Git
       - name: Enable long paths
         run: git config --system core.longpaths true
 
-      - name: Checkout Hadoop ${{ env.RELEASE_TAG }}
+      # Clone specific Hadoop version
+      - name: Checkout Hadoop
         uses: actions/checkout@v3
         with:
           repository: apache/hadoop
           ref: ${{ env.RELEASE_TAG }}
           path: hadoop
 
-      - name: Set up JDK
+      # Setup Java (depends on version of Hadoop)
+      - name: Set up Java 11 (Temurin)
         uses: actions/setup-java@v3
         with:
-          java-version: 11
           distribution: temurin
+          java-version: 11
 
+      # Setup Maven
       - name: Set up Maven
         uses: stCarolas/setup-maven@v4
         with:
           maven-version: 3.9.6
 
+      # Setup Visual Studio and MSVC
       - name: Set up MSVC build tools
         uses: ilammy/msvc-dev-cmd@v1
 
       - name: Set up Visual Studio Build Tools
         uses: microsoft/setup-msbuild@v1.3.1
 
+      # Install CMake
       - name: Install CMake
         uses: lukka/get-cmake@v3.27.1
 
+      # Install Protocol Buffers (protoc)
       - name: Install Protocol Buffers
-        run: |
-          choco install protoc -y
-          protoc --version
+        run: choco install protoc -y
 
-      - name: Install Python
+      # Install Python
+      - name: Install Python 3
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
-        #refreshenv
 
+      # Build Hadoop native binaries
       - name: Build Hadoop native binaries
         shell: cmd
         run: |
           cd hadoop
-          #mvn clean install -Pdist,native -DskipTests -Dtar -X -e
-        #mvn clean package -DskipTests -Pdist  -Dmaven.javadoc.skip=true 
-        #mvn clean install -Pdist,native -DskipTests -Dtar -X -e
+          mvn clean install -Pdist,native -DskipTests -Dtar -e -X
 
+      # List the final artifacts
       - name: List built binaries
         shell: cmd
         run: |
           dir hadoop\hadoop-dist\target\${{ env.DIST_VERSION }}\bin
+          dir hadoop\hadoop-dist\target\${{ env.DIST_VERSION }}\lib
           dir hadoop\hadoop-dist\target\${{ env.DIST_VERSION }}\lib\native
 
+      # Upload everything from dist folder
       - name: Upload all native artifacts
         uses: actions/upload-artifact@v4
         with:
