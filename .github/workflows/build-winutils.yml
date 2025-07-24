@@ -3,7 +3,7 @@ name: Build Hadoop Native Binaries for Windows
 on:
   workflow_dispatch:
     inputs:
-      hadoop_version:
+      hadoop_versions:
         description: 'Comma-separated list of Hadoop versions (e.g., 3.3.6,3.4.1)'
         required: true
         default: '3.4.1'
@@ -14,6 +14,8 @@ jobs:
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
+      - name: Install jq
+        run: sudo apt-get install -y jq
       - name: Set matrix from input
         id: set-matrix
         run: |
