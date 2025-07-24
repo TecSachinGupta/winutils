@@ -8,10 +8,11 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout Hadoop source
-        run: |
-          git clone https://github.com/apache/hadoop.git
-          cd hadoop
-          git checkout rel/release-3.4.1
+        uses: actions/checkout@v3
+        with:
+          repository: apache/hadoop
+          ref: rel/release-3.4.1
+          path: hadoop
 
       - name: Set up JDK
         uses: actions/setup-java@v3
@@ -29,6 +30,11 @@ jobs:
         run: |
           cd hadoop
           mvn clean install -Pdist,native -DskipTests -Dtar
+
+      - name: Build Hadoop native
+        shell: cmd
+        run: |
+          dir hadoop/hadoop-dist/target/**/bin/
 
       - name: Upload winutils.exe
         uses: actions/upload-artifact@v4
