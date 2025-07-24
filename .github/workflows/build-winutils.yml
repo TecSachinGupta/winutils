@@ -36,7 +36,7 @@ jobs:
       - name: Echo Hadoop version
         run: echo "Building For Hadoop ${{ matrix.version }}"
 
-      - name: Set variables
+      - name: Set environment variables
         run: |
           echo "RELEASE_TAG=rel/release-${{ matrix.version }}" >> $env:GITHUB_ENV
           echo "DIST_VERSION=hadoop-${{ matrix.version }}" >> $env:GITHUB_ENV
@@ -47,21 +47,25 @@ jobs:
           distribution: temurin
           java-version: 11
 
-      - name: Install Python 3
+      - name: Install Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
-      - name: Add msbuild to PATH
+      - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
 
-      - name: Set up Dependencies (Java, CMake etc.)
+      - name: Install Native Dependencies via Chocolatey
         run: |
           choco install -y maven git winflexbison3 cmake protoc ninja
           git config --system core.longpaths true
-          echo "$env:ChocolateyInstall\\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-          echo "C:\\Program Files\\protoc\\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-          echo "$env:JAVA_HOME\\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+        shell: powershell
+
+      - name: Update PATH for tools
+        run: |
+          echo "$env:ChocolateyInstall\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          echo "C:\Program Files\protoc\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          echo "$env:JAVA_HOME\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
         shell: powershell
 
       - name: Cache Maven repository
@@ -72,17 +76,17 @@ jobs:
           restore-keys: |
             maven-cache-
 
-      - name: Debug PATH and Java version
+      - name: Debug Environment
         shell: bash
         run: |
           echo "JAVA_HOME=$JAVA_HOME"
-          echo "Adjusted JAVA_HOME: $(cygpath -u "$JAVA_HOME")"
-          export JAVA_HOME="$(cygpath -u "$JAVA_HOME")"
-          export PATH="$JAVA_HOME/bin:$PATH"
           java -version
           mvn -v
           where bash
-          where protoc || echo "protoc not found"
+          where cl || echo "cl.exe not found"
+          where cmake || echo "cmake not found"
+          where win_flex || echo "win_flex not found"
+          where win_bison || echo "win_bison not found"
 
       - name: Checkout Hadoop Source Code
         uses: actions/checkout@v3
@@ -92,9 +96,29 @@ jobs:
           path: hadoop
 
       - name: Build Hadoop native binaries
+        shell: pwsh
+        run: |
+          $vsPath = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if (-Not (Test-Path $vsPath)) {
+            $vsPath = "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
+          }
+          if (-Not (Test-Path $vsPath)) {
+            $vsPath = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+          }
+          if (-Not (Test-Path $vsPath)) {
+            Write-Error "Could not find vcvars64.bat"
+            exit 1
+          }
+
+          # Initialize build env, then run Maven native build in bash
+          cmd /c "`"$vsPath`" && bash -c 'cd hadoop && mvn clean install -Pdist,native -DskipTests -Dtar -e -X'"
+
+      - name: Dump logs on failure
+        if: failure()
         shell: bash
         run: |
-          export JAVA_HOME="$(cygpath -u "$JAVA_HOME")"
-          export PATH="$JAVA_HOME/bin:$PATH"
-          cd hadoop
-          mvn clean install -Pdist,native -DskipTests -Dtar -e -X
+          echo "Dumping log files..."
+          find hadoop -type f -name "*.log" | while read log; do
+            echo "--- $log ---"
+            cat "$log"
+          done
