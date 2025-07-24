@@ -25,7 +25,7 @@ jobs:
           echo "Parsed versions: $clean_versions"
           echo "matrix={\"version\":$clean_versions}" >> $GITHUB_OUTPUT
         shell: bash
-  
+
   build:
     needs: prepare
     runs-on: windows-latest
@@ -35,7 +35,7 @@ jobs:
     steps:
       - name: Echo Hadoop version
         run: echo "Building For Hadoop ${{ matrix.version }}"
-        
+
       - name: Set variables
         run: |
           echo "RELEASE_TAG=rel/release-${{ matrix.version }}" >> $env:GITHUB_ENV
@@ -47,14 +47,6 @@ jobs:
           distribution: temurin
           java-version: 11
 
-      - name: Set up Dependencies (Java, CMake etc.)
-        run: |
-          choco install -y maven git winflexbison3 cmake protoc ninja
-          git config --system core.longpaths true
-          echo "$env:ChocolateyInstall\\bin" >> $env:GITHUB_PATH
-          echo "C:\Program Files\protoc\bin" >> $env:GITHUB_PATH
-          echo "$env:JAVA_HOME\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-
       - name: Install Python 3
         uses: actions/setup-python@v5
         with:
@@ -62,8 +54,15 @@ jobs:
 
       - name: Add msbuild to PATH
         uses: microsoft/setup-msbuild@v2
-        # with:
-        #   vs-version: '[16.4,16.5)'
+
+      - name: Set up Dependencies (Java, CMake etc.)
+        run: |
+          choco install -y maven git winflexbison3 cmake protoc ninja
+          git config --system core.longpaths true
+          echo "$env:ChocolateyInstall\\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          echo "C:\\Program Files\\protoc\\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          echo "$env:JAVA_HOME\\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+        shell: powershell
 
       - name: Cache Maven repository
         uses: actions/cache@v4
@@ -77,6 +76,9 @@ jobs:
         shell: bash
         run: |
           echo "JAVA_HOME=$JAVA_HOME"
+          echo "Adjusted JAVA_HOME: $(cygpath -u "$JAVA_HOME")"
+          export JAVA_HOME="$(cygpath -u "$JAVA_HOME")"
+          export PATH="$JAVA_HOME/bin:$PATH"
           java -version
           mvn -v
           where bash
@@ -90,7 +92,9 @@ jobs:
           path: hadoop
 
       - name: Build Hadoop native binaries
-        shell: cmd
+        shell: bash
         run: |
+          export JAVA_HOME="$(cygpath -u "$JAVA_HOME")"
+          export PATH="$JAVA_HOME/bin:$PATH"
           cd hadoop
           mvn clean install -Pdist,native -DskipTests -Dtar -e -X
