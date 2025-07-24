@@ -110,8 +110,9 @@ jobs:
             exit 1
           }
 
-          # Initialize build env, then run Maven native build in bash
-          cmd /c "`"$vsPath`" && bash -c 'cd hadoop && mvn clean install -Pdist,native -DskipTests -Dtar -e -X'"
+          # 👇 Corrected path to where the pom.xml lives
+          cmd /c "`"$vsPath`" && cd hadoop && mvn clean install -Pdist,native -DskipTests -Dtar -e -X"
+
 
       - name: Dump logs on failure
         if: failure()
