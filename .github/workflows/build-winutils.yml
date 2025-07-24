@@ -1,20 +1,32 @@
-name: Build Winutils for Hadoop 3.4.1
+name: Build Hadoop Native Binaries for Windows
 
 on:
   workflow_dispatch:
+    inputs:
+      hadoop_version:
+        description: 'Hadoop version (e.g. 3.4.1)'
+        required: true
+        default: '3.4.1'
 
 jobs:
   build:
     runs-on: windows-latest
+
     steps:
+      - name: Set variables
+        id: vars
+        run: |
+          echo "RELEASE_TAG=rel/release-${{ github.event.inputs.hadoop_version }}" >> $GITHUB_ENV
+          echo "DIST_VERSION=hadoop-${{ github.event.inputs.hadoop_version }}" >> $GITHUB_ENV
+
       - name: Enable long paths
         run: git config --system core.longpaths true
-      
-      - name: Checkout Hadoop source
+
+      - name: Checkout Hadoop ${{ env.RELEASE_TAG }}
         uses: actions/checkout@v3
         with:
           repository: apache/hadoop
-          ref: rel/release-3.4.1
+          ref: ${{ env.RELEASE_TAG }}
           path: hadoop
 
       - name: Set up JDK
@@ -28,19 +40,26 @@ jobs:
         with:
           maven-version: 3.9.6
 
-      - name: Build Hadoop native
+      - name: Set up MSBuild (for native code)
+        uses: microsoft/setup-msbuild@v1.1
+
+      - name: Build Hadoop native binaries
         shell: cmd
         run: |
           cd hadoop
           mvn clean install -Pdist,native -DskipTests -Dtar
 
-      - name: Build Hadoop native
+      - name: List built binaries
         shell: cmd
         run: |
-          dir hadoop/hadoop-dist/target/**/bin/
+          dir hadoop\hadoop-dist\target\${{ env.DIST_VERSION }}\bin
+          dir hadoop\hadoop-dist\target\${{ env.DIST_VERSION }}\lib\native
 
-      - name: Upload winutils.exe
+      - name: Upload all native artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: winutils
-          path: hadoop/hadoop-dist/target/**/bin/**
+          name: ${{ env.DIST_VERSION }}-native-windows
+          path: |
+            hadoop/hadoop-dist/target/${{ env.DIST_VERSION }}/bin/**
+            hadoop/hadoop-dist/target/${{ env.DIST_VERSION }}/lib/**
+            hadoop/hadoop-dist/target/${{ env.DIST_VERSION }}/lib/native/**
