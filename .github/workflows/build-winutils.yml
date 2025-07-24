@@ -41,10 +41,16 @@ jobs:
           echo "RELEASE_TAG=rel/release-${{ matrix.version }}" >> $env:GITHUB_ENV
           echo "DIST_VERSION=hadoop-${{ matrix.version }}" >> $env:GITHUB_ENV
 
+      - name: Set up Java 11 (Temurin)
+        uses: actions/setup-java@v3
+        with:
+          distribution: temurin
+          java-version: 11
+
       - name: Set up Dependencies (Java, CMake etc.)
         run: |
-          choco install -y maven openjdk11 git winflexbison3 cmake protoc ninja
-          echo "JAVA_HOME=C:\Program Files\OpenJDK\openjdk-11" >> $env:GITHUB_ENV
+          choco install -y maven git winflexbison3 cmake protoc ninja
+          git config --system core.longpaths true
           echo "$env:ChocolateyInstall\\bin" >> $env:GITHUB_PATH
           echo "C:\Program Files\protoc\bin" >> $env:GITHUB_PATH
           echo "$env:JAVA_HOME\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
