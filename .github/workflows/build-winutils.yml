@@ -21,7 +21,7 @@ jobs:
         id: set-matrix
         run: |
           versions="${{ github.event.inputs.hadoop_version }}"
-          clean_versions=$(echo "$versions" | jq -R 'split(",") | map(gsub("^\\s+|\\s+$"; ""))')
+          clean_versions=$(echo "$versions" | jq -c -R 'split(",") | map(gsub("^\\s+|\\s+$"; ""))')
           echo "Parsed versions: $clean_versions"
           echo "matrix={\"version\":$clean_versions}" >> $GITHUB_OUTPUT
         shell: bash
