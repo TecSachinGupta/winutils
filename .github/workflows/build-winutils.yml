@@ -36,7 +36,7 @@ jobs:
       - name: Echo Hadoop version
         run: echo "Building For Hadoop ${{ matrix.version }}"
 
-      - name: Set environment variables
+      - name: Set variables
         run: |
           echo "RELEASE_TAG=rel/release-${{ matrix.version }}" >> $env:GITHUB_ENV
           echo "DIST_VERSION=hadoop-${{ matrix.version }}" >> $env:GITHUB_ENV
@@ -47,46 +47,19 @@ jobs:
           distribution: temurin
           java-version: 11
 
-      - name: Install Python
+      - name: Install Python 3
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
-      - name: Add MSBuild to PATH
+      - name: Add msbuild to PATH
         uses: microsoft/setup-msbuild@v2
 
-      - name: Install Native Dependencies via Chocolatey
+      - name: Install Native Build Dependencies
+        shell: powershell
         run: |
-          choco install -y maven git winflexbison3 cmake protoc ninja
+          choco install -y maven git winflexbison3 cmake protoc ninja nasm
           git config --system core.longpaths true
-        shell: powershell
-
-      - name: Update PATH for tools
-        run: |
-          echo "$env:ChocolateyInstall\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-          echo "C:\Program Files\protoc\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-          echo "$env:JAVA_HOME\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-        shell: powershell
-
-      - name: Cache Maven repository
-        uses: actions/cache@v4
-        with:
-          path: ~/.m2/repository
-          key: maven-cache-${{ matrix.version }}
-          restore-keys: |
-            maven-cache-
-
-      - name: Debug Environment
-        shell: bash
-        run: |
-          echo "JAVA_HOME=$JAVA_HOME"
-          java -version
-          mvn -v
-          where bash
-          where cl || echo "cl.exe not found"
-          where cmake || echo "cmake not found"
-          where win_flex || echo "win_flex not found"
-          where win_bison || echo "win_bison not found"
 
       - name: Checkout Hadoop Source Code
         uses: actions/checkout@v3
@@ -95,31 +68,13 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
           path: hadoop
 
-      - name: Build Hadoop native binaries
-        shell: pwsh
+      - name: Build Hadoop Native Binaries
+        shell: powershell
         run: |
-          $vsPath = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          if (-Not (Test-Path $vsPath)) {
-            $vsPath = "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
-          }
-          if (-Not (Test-Path $vsPath)) {
-            $vsPath = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
-          }
-          if (-Not (Test-Path $vsPath)) {
-            Write-Error "Could not find vcvars64.bat"
-            exit 1
-          }
+          # Locate Visual Studio vcvars64.bat
+          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vsWhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+          $vcVarsPath = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
 
-          # 👇 Corrected path to where the pom.xml lives
-          cmd /c "`"$vsPath`" && cd hadoop && mvn clean install -Pdist,native -DskipTests -Dtar -e -X"
-
-
-      - name: Dump logs on failure
-        if: failure()
-        shell: bash
-        run: |
-          echo "Dumping log files..."
-          find hadoop -type f -name "*.log" | while read log; do
-            echo "--- $log ---"
-            cat "$log"
-          done
+          # Build using Maven with native profile
+          cmd /c "`"$vcVarsPath`" && cd hadoop && mvn clean install -Pdist,native -DskipTests -Dtar -Dmaven.javadoc.skip=true"
