@@ -1,6 +1,8 @@
 name: Build Hadoop Native Binaries for Windows
 
 on:
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
     inputs:
       hadoop_version:
@@ -9,7 +11,7 @@ on:
         default: '3.4.1'
 
 env:
-  # Default Hadoop versions for push/PR events
+  # Default Hadoop versions for PR events
   DEFAULT_HADOOP_VERSIONS: '3.3.6,3.4.1'
 
 jobs:
@@ -68,7 +70,7 @@ jobs:
       - name: Install Native Build Dependencies
         shell: powershell
         run: |
-          choco install -y maven git winflexbison3 cmake protoc ninja nasm
+          choco install -y maven git winflexbison3 cmake protoc ninja nasm openssl zlib
           git config --system core.longpaths true
 
       - name: Checkout Hadoop Source Code
@@ -87,7 +89,7 @@ jobs:
             ${{ runner.os }}-maven-hadoop-${{ matrix.version }}-
             ${{ runner.os }}-maven-
 
-      - name: Build Hadoop Native Binaries
+      - name: Build Hadoop Native Components Only
         shell: powershell
         run: |
           # Locate Visual Studio vcvars64.bat using vswhere
@@ -96,283 +98,426 @@ jobs:
             $vsPath = & $vsWhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
             $vcVarsPath = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
           } else {
-            # Fallback paths
-            $vcVarsPath = "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-            if (-not (Test-Path $vcVarsPath)) {
-              $vcVarsPath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+            # Fallback paths for different VS installations
+            $fallbackPaths = @(
+              "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat",
+              "${env:ProgramFiles}\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat",
+              "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat",
+              "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+            )
+            
+            foreach ($path in $fallbackPaths) {
+              if (Test-Path $path) {
+                $vcVarsPath = $path
+                break
+              }
             }
+          }
+          
+          if (-not (Test-Path $vcVarsPath)) {
+            Write-Host "ERROR: Could not find Visual Studio vcvars64.bat"
+            exit 1
           }
           
           Write-Host "Using Visual Studio vcvars64.bat at: $vcVarsPath"
           
-          # Try the build with different strategies
-          $buildSuccess = $false
+          # Set up build environment
+          $env:JAVA_HOME = $env:JAVA_HOME_11_X64
+          $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
           
-          # Strategy 1: Build only native components first
-          Write-Host "=== Attempting Strategy 1: Native-only build ==="
-          try {
-            cmd /c "`"$vcVarsPath`" && cd hadoop && mvn clean compile -Pnative -DskipTests -q"
+          # Skip problematic modules and focus on native components
+          $env:MAVEN_OPTS = "-Xmx2048m -XX:MaxPermSize=512m"
+          
+          Set-Location hadoop
+          
+          Write-Host "=== Phase 1: Basic Project Setup ==="
+          $setupResult = cmd /c "`"$vcVarsPath`" && mvn clean validate -q -DskipTests -Dmaven.javadoc.skip=true" 2>&1
+          Write-Host "Setup result: $setupResult"
+          
+          Write-Host "=== Phase 2: Build Core Dependencies ==="
+          $coreModules = @(
+            "hadoop-project",
+            "hadoop-project-dist", 
+            "hadoop-assemblies",
+            "hadoop-maven-plugins",
+            "hadoop-build-tools"
+          )
+          
+          foreach ($module in $coreModules) {
+            if (Test-Path $module) {
+              Write-Host "Building core module: $module"
+              $result = cmd /c "`"$vcVarsPath`" && mvn compile -pl $module -q -DskipTests -Dmaven.javadoc.skip=true" 2>&1
+              if ($LASTEXITCODE -ne 0) {
+                Write-Host "Warning: $module build had issues: $result"
+              }
+            }
+          }
+          
+          Write-Host "=== Phase 3: Build Native Libraries with Targeted Approach ==="
+          
+          # Strategy 1: Build hadoop-common native only
+          Write-Host "Building hadoop-common native libraries..."
+          $commonResult = cmd /c "`"$vcVarsPath`" && mvn compile -pl hadoop-common-project/hadoop-common -Pnative -DskipTests -Dmaven.javadoc.skip=true -Dtar -q" 2>&1
+          Write-Host "Common native result: $commonResult"
+          $commonSuccess = $LASTEXITCODE -eq 0
+          
+          # Strategy 2: Build hdfs native 
+          Write-Host "Building hadoop-hdfs native libraries..."
+          $hdfsResult = cmd /c "`"$vcVarsPath`" && mvn compile -pl hadoop-hdfs-project/hadoop-hdfs -Pnative -DskipTests -Dmaven.javadoc.skip=true -q" 2>&1
+          Write-Host "HDFS native result: $hdfsResult"
+          $hdfsSuccess = $LASTEXITCODE -eq 0
+          
+          # Strategy 3: Direct CMake build for hadoop-common
+          Write-Host "=== Phase 4: Direct CMake Build ==="
+          $nativeDir = "hadoop-common-project\hadoop-common\src\main\native"
+          if (Test-Path $nativeDir) {
+            Set-Location $nativeDir
+            
+            # Clean any existing build
+            if (Test-Path "build") { 
+              Remove-Item -Recurse -Force "build" -ErrorAction SilentlyContinue
+            }
+            
+            Write-Host "Configuring CMake build..."
+            $cmakeConfig = cmd /c "`"$vcVarsPath`" && cmake . -B build -G `"Visual Studio 17 2022`" -A x64 -DJVM_ARCH_DATA_MODEL=64 -DREQUIRE_LIBWEBHDFS=OFF -DREQUIRE_SNAPPY=OFF" 2>&1
+            Write-Host "CMake config: $cmakeConfig"
+            
             if ($LASTEXITCODE -eq 0) {
-              Write-Host "Native compilation successful, proceeding with full build..."
-              cmd /c "`"$vcVarsPath`" && cd hadoop && mvn package -Pdist,native -DskipTests -Dtar -Dmaven.javadoc.skip=true -Ddrfa.src.skip=true"
-              if ($LASTEXITCODE -eq 0) {
-                $buildSuccess = $true
-                Write-Host "=== Strategy 1 successful ==="
-              }
+              Write-Host "Building with CMake..."
+              $cmakeBuild = cmd /c "`"$vcVarsPath`" && cmake --build build --config Release --target hadoop" 2>&1
+              Write-Host "CMake build: $cmakeBuild"
+              $cmakeSuccess = $LASTEXITCODE -eq 0
+            } else {
+              $cmakeSuccess = $false
             }
-          } catch {
-            Write-Host "Strategy 1 failed: $($_.Exception.Message)"
-          }
-          
-          # Strategy 2: Skip problematic pre-dist phase
-          if (-not $buildSuccess) {
-            Write-Host "=== Attempting Strategy 2: Skip pre-dist phase ==="
-            try {
-              cmd /c "`"$vcVarsPath`" && cd hadoop && mvn clean install -Pdist,native -DskipTests -Dmaven.javadoc.skip=true -Ddrfa.src.skip=true -Dpre-dist.skip=true"
-              if ($LASTEXITCODE -eq 0) {
-                $buildSuccess = $true
-                Write-Host "=== Strategy 2 successful ==="
-              }
-            } catch {
-              Write-Host "Strategy 2 failed: $($_.Exception.Message)"
-            }
-          }
-          
-          # Strategy 3: Build individual modules
-          if (-not $buildSuccess) {
-            Write-Host "=== Attempting Strategy 3: Individual module build ==="
-            try {
-              # First build hadoop-common with native
-              cmd /c "`"$vcVarsPath`" && cd hadoop && mvn clean install -pl hadoop-common-project/hadoop-common -Pnative -DskipTests -q"
-              
-              # Then build hadoop-hdfs with native  
-              cmd /c "`"$vcVarsPath`" && cd hadoop && mvn clean install -pl hadoop-hdfs-project/hadoop-hdfs -Pnative -DskipTests -q"
-              
-              # Finally build the distribution
-              cmd /c "`"$vcVarsPath`" && cd hadoop && mvn clean package -pl hadoop-dist -Pdist -DskipTests -Dtar -Dmaven.javadoc.skip=true"
-              
-              if ($LASTEXITCODE -eq 0) {
-                $buildSuccess = $true
-                Write-Host "=== Strategy 3 successful ==="
-              }
-            } catch {
-              Write-Host "Strategy 3 failed: $($_.Exception.Message)"
-            }
-          }
-          
-          if (-not $buildSuccess) {
-            Write-Host "=== All build strategies failed ==="
-            Write-Host "Attempting to extract any built native libraries..."
             
-            # Try to find any native libraries that may have been built
-            $possiblePaths = @(
-              "hadoop\hadoop-common-project\hadoop-common\target\native\target\usr\local\lib",
-              "hadoop\hadoop-hdfs-project\hadoop-hdfs\target\native\target\usr\local\lib", 
-              "hadoop\hadoop-common-project\hadoop-common\src\main\native\target\usr\local\lib"
-            )
+            Set-Location $env:GITHUB_WORKSPACE\hadoop
+          } else {
+            $cmakeSuccess = $false
+          }
+          
+          # Strategy 4: Build winutils directly
+          Write-Host "=== Phase 5: Building winutils directly ==="
+          $winutilsSuccess = $false
+          $winutilsDir = "hadoop-common-project\hadoop-common\src\main\winutils"
+          if (Test-Path $winutilsDir) {
+            Set-Location $winutilsDir
             
-            foreach ($path in $possiblePaths) {
-              if (Test-Path $path) {
-                Write-Host "Found native libraries at: $path"
-                Get-ChildItem -Path $path -Recurse -File | ForEach-Object {
-                  Write-Host "  $($_.Name)"
+            # Look for solution or project files
+            $slnFiles = Get-ChildItem -Filter "*.sln" -ErrorAction SilentlyContinue
+            $vcxprojFiles = Get-ChildItem -Filter "*.vcxproj" -ErrorAction SilentlyContinue
+            
+            if ($slnFiles) {
+              foreach ($sln in $slnFiles) {
+                Write-Host "Building solution: $($sln.Name)"
+                $slnResult = cmd /c "`"$vcVarsPath`" && msbuild `"$($sln.FullName)`" /p:Configuration=Release /p:Platform=x64 /m" 2>&1
+                Write-Host "Solution build result: $slnResult"
+                if ($LASTEXITCODE -eq 0) {
+                  $winutilsSuccess = $true
+                }
+              }
+            } elseif ($vcxprojFiles) {
+              foreach ($proj in $vcxprojFiles) {
+                Write-Host "Building project: $($proj.Name)"
+                $projResult = cmd /c "`"$vcVarsPath`" && msbuild `"$($proj.FullName)`" /p:Configuration=Release /p:Platform=x64" 2>&1
+                Write-Host "Project build result: $projResult"
+                if ($LASTEXITCODE -eq 0) {
+                  $winutilsSuccess = $true
                 }
               }
             }
             
-            Write-Host "Build failed but continuing to check for partial artifacts..."
+            Set-Location $env:GITHUB_WORKSPACE\hadoop
+          }
+          
+          # Summary
+          Write-Host "=== Build Summary ==="
+          Write-Host "Hadoop Common Native: $(if($commonSuccess){'SUCCESS'}else{'FAILED'})"
+          Write-Host "Hadoop HDFS Native: $(if($hdfsSuccess){'SUCCESS'}else{'FAILED'})"
+          Write-Host "CMake Direct Build: $(if($cmakeSuccess){'SUCCESS'}else{'FAILED'})"
+          Write-Host "Winutils Build: $(if($winutilsSuccess){'SUCCESS'}else{'FAILED'})"
+          
+          $anySuccess = $commonSuccess -or $hdfsSuccess -or $cmakeSuccess -or $winutilsSuccess
+          if ($anySuccess) {
+            Write-Host "At least one build strategy succeeded!"
+          } else {
+            Write-Host "All build strategies failed, but continuing to search for any existing binaries..."
           }
 
-      - name: Verify native libraries
+      - name: Comprehensive Native Library Search
         shell: powershell
         run: |
-          Write-Host "=== Searching for native libraries ==="
+          Write-Host "=== Comprehensive Search for Native Libraries ==="
           
-          # Primary locations to check
-          $searchPaths = @(
-            "hadoop\hadoop-dist\target\${{ env.DIST_VERSION }}\lib\native",
-            "hadoop\hadoop-dist\target\hadoop-${{ matrix.version }}\lib\native", 
-            "hadoop\hadoop-common-project\hadoop-common\target\native\target\usr\local\lib",
-            "hadoop\hadoop-hdfs-project\hadoop-hdfs\target\native\target\usr\local\lib",
-            "hadoop\hadoop-common-project\hadoop-common\src\main\native\target\usr\local\lib"
-          )
+          Set-Location hadoop
           
-          $foundLibraries = @()
+          # Define comprehensive search patterns
+          $nativeExtensions = @("*.dll", "*.exe", "*.lib", "*.so")
+          $keyFiles = @("winutils.exe", "hadoop.dll", "hdfs.dll", "libwinutils.lib", "libhadoop.lib")
           
-          foreach ($path in $searchPaths) {
-            if (Test-Path $path) {
-              Write-Host "Found native directory: $path"
-              $files = Get-ChildItem -Path $path -Recurse -File -ErrorAction SilentlyContinue
-              foreach ($file in $files) {
-                Write-Host "  $($file.Name) - $($file.Length) bytes"
-                $foundLibraries += $file.FullName
+          $foundFiles = @()
+          $searchLocations = @()
+          
+          # Search in target directories first
+          Write-Host "Searching target directories..."
+          $targetDirs = Get-ChildItem -Recurse -Directory -Name "target" -ErrorAction SilentlyContinue
+          foreach ($targetDir in $targetDirs) {
+            $fullTargetPath = $targetDir
+            if (Test-Path $fullTargetPath) {
+              $targetFiles = Get-ChildItem -Path $fullTargetPath -Recurse -Include $nativeExtensions -ErrorAction SilentlyContinue
+              foreach ($file in $targetFiles) {
+                if ($file.Name -notmatch "test|surefire|javadoc" -and $file.Length -gt 0) {
+                  Write-Host "Found in target: $($file.FullName) ($($file.Length) bytes)"
+                  $foundFiles += @{
+                    Path = $file.FullName
+                    RelativePath = $file.FullName.Replace($PWD.Path + "\", "")
+                    Name = $file.Name
+                    Size = $file.Length
+                    Type = "target"
+                  }
+                }
               }
             }
           }
           
-          if ($foundLibraries.Count -eq 0) {
-            Write-Host "No native libraries found. Searching entire hadoop directory for .dll and .exe files..."
-            $allNativeFiles = Get-ChildItem -Path "hadoop" -Recurse -Include "*.dll", "*.exe", "*.so" -ErrorAction SilentlyContinue
-            foreach ($file in $allNativeFiles) {
-              Write-Host "Found: $($file.FullName)"
-              $foundLibraries += $file.FullName
+          # Search build directories
+          Write-Host "Searching build directories..."
+          $buildDirs = Get-ChildItem -Recurse -Directory -Name "build", "Release", "Debug", "x64" -ErrorAction SilentlyContinue
+          foreach ($buildDir in $buildDirs) {
+            $fullBuildPath = $buildDir
+            if (Test-Path $fullBuildPath) {
+              $buildFiles = Get-ChildItem -Path $fullBuildPath -Recurse -Include $nativeExtensions -ErrorAction SilentlyContinue
+              foreach ($file in $buildFiles) {
+                if ($file.Length -gt 0) {
+                  Write-Host "Found in build: $($file.FullName) ($($file.Length) bytes)"
+                  $foundFiles += @{
+                    Path = $file.FullName
+                    RelativePath = $file.FullName.Replace($PWD.Path + "\", "")
+                    Name = $file.Name
+                    Size = $file.Length
+                    Type = "build"
+                  }
+                }
+              }
             }
           }
           
-          # Check for winutils specifically
-          $winutilsFiles = Get-ChildItem -Path "hadoop" -Recurse -Name "winutils.exe" -ErrorAction SilentlyContinue
-          if ($winutilsFiles) {
-            Write-Host "=== Found winutils.exe ==="
-            foreach ($winutil in $winutilsFiles) {
-              Write-Host "  $winutil"
+          # Search for key files specifically
+          Write-Host "Searching for key files..."
+          foreach ($keyFile in $keyFiles) {
+            $keyFileMatches = Get-ChildItem -Recurse -Name $keyFile -ErrorAction SilentlyContinue
+            foreach ($match in $keyFileMatches) {
+              $fullPath = Resolve-Path $match -ErrorAction SilentlyContinue
+              if ($fullPath -and (Get-Item $fullPath).Length -gt 0) {
+                Write-Host "Found key file: $fullPath"
+                $foundFiles += @{
+                  Path = $fullPath.Path
+                  RelativePath = $match
+                  Name = $keyFile
+                  Size = (Get-Item $fullPath).Length
+                  Type = "key"
+                }
+              }
             }
           }
           
-          # Set environment variable for packaging step
-          $env:NATIVE_LIBS_FOUND = $foundLibraries.Count.ToString()
-          echo "NATIVE_LIBS_FOUND=$($foundLibraries.Count)" >> $env:GITHUB_ENV
+          # Remove duplicates
+          $uniqueFiles = $foundFiles | Sort-Object Path -Unique
+          
+          # Export results for next step
+          $foundCount = $uniqueFiles.Count
+          echo "NATIVE_FILES_FOUND=$foundCount" >> $env:GITHUB_ENV
+          
+          Write-Host "=== Search Summary ==="
+          Write-Host "Total unique native files found: $foundCount"
+          
+          if ($foundCount -gt 0) {
+            Write-Host "Files found:"
+            foreach ($file in $uniqueFiles) {
+              Write-Host "  $($file.Name) - $($file.Size) bytes - $($file.RelativePath)"
+            }
+            
+            # Save file list for packaging
+            $fileList = $uniqueFiles | ConvertTo-Json -Depth 3
+            $fileList | Out-File -FilePath "$env:GITHUB_WORKSPACE\found_files.json" -Encoding UTF8
+          } else {
+            Write-Host "No native files found. Build may have failed completely."
+            "[]" | Out-File -FilePath "$env:GITHUB_WORKSPACE\found_files.json" -Encoding UTF8
+          }
 
-      - name: Package native libraries and winutils
+      - name: Package native libraries
         shell: powershell
         run: |
           $version = "${{ matrix.version }}"
           $outputDir = "hadoop-$version-native-windows"
           
-          # Create output directory
-          New-Item -ItemType Directory -Path $outputDir -Force
+          # Create output directory structure
+          New-Item -ItemType Directory -Path "$outputDir\lib\native" -Force
+          New-Item -ItemType Directory -Path "$outputDir\bin" -Force
+          New-Item -ItemType Directory -Path "$outputDir\sbin" -Force
           
-          $artifactsFound = $false
+          $filesPackaged = 0
           
-          # Search for and copy native libraries from various possible locations
-          $searchPaths = @(
-            "hadoop\hadoop-dist\target\${{ env.DIST_VERSION }}\lib\native",
-            "hadoop\hadoop-dist\target\hadoop-$version\lib\native",
-            "hadoop\hadoop-common-project\hadoop-common\target\native\target\usr\local\lib",
-            "hadoop\hadoop-hdfs-project\hadoop-hdfs\target\native\target\usr\local\lib"
-          )
-          
-          foreach ($searchPath in $searchPaths) {
-            if (Test-Path $searchPath) {
-              Write-Host "Copying native libraries from: $searchPath"
-              $libOutputDir = "$outputDir\lib\native"
-              New-Item -ItemType Directory -Path $libOutputDir -Force
-              Copy-Item -Path "$searchPath\*" -Destination $libOutputDir -Recurse -Force -ErrorAction SilentlyContinue
-              $artifactsFound = $true
-              break
-            }
-          }
-          
-          # Search for and copy bin directory (including winutils.exe)
-          $binSearchPaths = @(
-            "hadoop\hadoop-dist\target\${{ env.DIST_VERSION }}\bin",
-            "hadoop\hadoop-dist\target\hadoop-$version\bin"
-          )
-          
-          foreach ($binPath in $binSearchPaths) {
-            if (Test-Path $binPath) {
-              Write-Host "Copying bin directory from: $binPath"
-              $binOutputDir = "$outputDir\bin"
-              New-Item -ItemType Directory -Path $binOutputDir -Force
-              Copy-Item -Path "$binPath\*" -Destination $binOutputDir -Recurse -Force -ErrorAction SilentlyContinue
-              $artifactsFound = $true
-              break
-            }
-          }
-          
-          # If primary locations failed, search for individual files
-          if (-not $artifactsFound) {
-            Write-Host "Primary locations not found, searching for individual native files..."
+          # Read found files list
+          if (Test-Path "found_files.json") {
+            $foundFiles = Get-Content "found_files.json" | ConvertFrom-Json
             
-            # Search for any .dll, .exe files in the entire hadoop directory
-            $nativeFiles = Get-ChildItem -Path "hadoop" -Recurse -Include "*.dll", "winutils.exe", "hadoop.exe" -ErrorAction SilentlyContinue
+            Write-Host "Packaging $($foundFiles.Count) found files..."
             
-            if ($nativeFiles) {
-              Write-Host "Found individual native files:"
-              $libOutputDir = "$outputDir\lib\native"
-              $binOutputDir = "$outputDir\bin"
-              New-Item -ItemType Directory -Path $libOutputDir -Force
-              New-Item -ItemType Directory -Path $binOutputDir -Force
+            foreach ($fileInfo in $foundFiles) {
+              $sourcePath = $fileInfo.Path
+              $fileName = $fileInfo.Name
               
-              foreach ($file in $nativeFiles) {
-                Write-Host "  Copying: $($file.Name)"
-                if ($file.Extension -eq ".dll") {
-                  Copy-Item -Path $file.FullName -Destination $libOutputDir -Force
+              if (Test-Path $sourcePath) {
+                # Determine destination based on file type
+                if ($fileName -match "\.dll$") {
+                  $destPath = "$outputDir\lib\native\$fileName"
+                  Write-Host "Copying DLL: $fileName"
+                } elseif ($fileName -match "\.exe$") {
+                  if ($fileName -match "winutils|hadoop") {
+                    $destPath = "$outputDir\bin\$fileName"
+                  } else {
+                    $destPath = "$outputDir\sbin\$fileName"
+                  }
+                  Write-Host "Copying EXE: $fileName"
+                } elseif ($fileName -match "\.lib$") {
+                  $destPath = "$outputDir\lib\native\$fileName"
+                  Write-Host "Copying LIB: $fileName"
                 } else {
-                  Copy-Item -Path $file.FullName -Destination $binOutputDir -Force
+                  $destPath = "$outputDir\lib\native\$fileName"
+                  Write-Host "Copying OTHER: $fileName"
                 }
-                $artifactsFound = $true
+                
+                Copy-Item -Path $sourcePath -Destination $destPath -Force -ErrorAction SilentlyContinue
+                if (Test-Path $destPath) {
+                  $filesPackaged++
+                }
               }
             }
           }
           
-          # Create README with build info
-          $buildStatus = if ($artifactsFound) { "SUCCESS (Partial)" } else { "FAILED" }
+          # Create comprehensive README
+          $buildStatus = if ($filesPackaged -gt 0) { 
+            "PARTIAL SUCCESS - $filesPackaged files packaged" 
+          } else { 
+            "BUILD FAILED - No native files found" 
+          }
+          
           $readme = @"
-          Hadoop $version Native Binaries for Windows
-          Build Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC')
-          Build Status: $buildStatus
-          Source: Apache Hadoop $version (tag: ${{ env.RELEASE_TAG }})
+          # Hadoop $version Native Binaries for Windows
           
-          Contents:
-          - lib/native/: Native libraries (.dll files) if available
-          - bin/: Windows utilities including winutils.exe if available
+          **Build Date:** $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC')  
+          **Build Status:** $buildStatus  
+          **Source:** Apache Hadoop $version (tag: ${{ env.RELEASE_TAG }})  
+          **Files Packaged:** $filesPackaged
           
-          Build Notes:
-          - Built using multiple fallback strategies due to Hadoop Windows build complexity
-          - Some components may be missing if the full build failed
-          - Check BUILD_LOG.txt for detailed build information
+          ## Contents
           
-          These binaries were built using:
-          - Java 11 (Temurin)
-          - Visual Studio 2022
-          - Maven with various native profiles
+          - **lib/native/**: Native libraries (.dll, .lib files)
+          - **bin/**: Essential Windows utilities (winutils.exe, hadoop.exe)
+          - **sbin/**: Additional system utilities
+          
+          ## Installation
+          
+          1. Extract this archive to your desired location
+          2. Set environment variable: `HADOOP_HOME=<path-to-extracted-folder>`
+          3. Add to PATH: `%HADOOP_HOME%\bin`
+          4. Verify installation: `winutils.exe` (should show usage info)
+          
+          ## Build Information
+          
+          This package was built using multiple strategies:
+          1. Maven native profile compilation
+          2. Direct CMake builds for native components  
+          3. MSBuild for Windows-specific utilities
+          4. Comprehensive file system search for all artifacts
+          
+          Some components may be missing if specific build strategies failed.
+          Check BUILD_LOG.txt for detailed information.
+          
+          ## Troubleshooting
+          
+          If you encounter issues:
+          - Ensure Visual C++ Redistributable is installed
+          - Check that all .dll files are in lib/native/
+          - Verify winutils.exe has execution permissions
+          - See GitHub Actions logs for build details
+          
+          ## Notes
+          
+          These binaries are built from official Apache Hadoop source code.
+          For production use, consider building from source in your target environment.
           "@
           
-          $readme | Out-File -FilePath "$outputDir\README.txt" -Encoding UTF8
+          $readme | Out-File -FilePath "$outputDir\README.md" -Encoding UTF8
           
-          # Create build status file
+          # Create detailed build log
           $buildLog = @"
-          Build attempted with multiple strategies:
-          1. Native-only build first, then full build
-          2. Skip pre-dist phase build
-          3. Individual module builds
+          Hadoop $version Windows Native Build Log
+          ========================================
           
-          Native libraries found: $env:NATIVE_LIBS_FOUND
-          Artifacts packaged: $artifactsFound
+          Build Environment:
+          - OS: Windows Server (GitHub Actions)
+          - Java: 11 (Temurin)
+          - Visual Studio: 2022
+          - Build Tools: Maven, CMake, MSBuild
           
-          For detailed build logs, check the GitHub Actions build logs.
+          Native Files Found: $env:NATIVE_FILES_FOUND
+          Files Packaged: $filesPackaged
+          
+          Build Strategies Attempted:
+          1. Maven with native profile on hadoop-common
+          2. Maven with native profile on hadoop-hdfs  
+          3. Direct CMake build in native source directory
+          4. Direct MSBuild on winutils projects
+          5. Comprehensive filesystem search for any built artifacts
+          
+          For complete build logs, refer to the GitHub Actions workflow execution.
+          
+          If this package is missing expected files, the build may have encountered
+          platform-specific issues. Consider:
+          - Using official Hadoop distributions when available
+          - Building in a controlled Windows environment
+          - Checking for updated build dependencies
           "@
           
           $buildLog | Out-File -FilePath "$outputDir\BUILD_LOG.txt" -Encoding UTF8
           
-          if (-not $artifactsFound) {
-            Write-Host "Warning: No native artifacts found"
-            "Build completed but no native libraries or binaries were found.`nThis may be due to build failures. Check the GitHub Actions logs for details." | Out-File -FilePath "$outputDir\BUILD_ERROR.txt"
+          # Create empty placeholder if no files found
+          if ($filesPackaged -eq 0) {
+            "This build did not produce native libraries. Check BUILD_LOG.txt for details." | Out-File -FilePath "$outputDir\BUILD_FAILED.txt" -Encoding UTF8
           }
           
-          # Create archive regardless of success/failure for debugging
+          # Create archive
           Compress-Archive -Path $outputDir -DestinationPath "hadoop-$version-native-windows.zip" -Force
-          Write-Host "Package created: hadoop-$version-native-windows.zip"
+          Write-Host "Created package: hadoop-$version-native-windows.zip"
           
-          # List final package contents
-          Write-Host "=== Final package contents ==="
+          # Display final package contents
+          Write-Host "=== Final Package Contents ==="
           Get-ChildItem -Path $outputDir -Recurse | ForEach-Object {
-            Write-Host "  $($_.FullName.Replace($outputDir, ''))"
+            $relativePath = $_.FullName.Replace((Resolve-Path $outputDir).Path, "")
+            Write-Host "  $relativePath"
           }
+          
+          Write-Host "=== Package Summary ==="
+          Write-Host "Files successfully packaged: $filesPackaged"
+          Write-Host "Archive size: $((Get-Item "hadoop-$version-native-windows.zip").Length) bytes"
 
       - name: Upload native libraries artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4  
         with:
           name: hadoop-${{ matrix.version }}-native-windows
           path: hadoop-${{ matrix.version }}-native-windows.zip
           retention-days: 30
 
-      - name: Upload build logs
+      - name: Upload build logs for debugging
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs-hadoop-${{ matrix.version }}
           path: |
+            found_files.json
             hadoop/**/*.log
+            hadoop/**/CMakeFiles/**/*.log
             hadoop/**/target/surefire-reports/
           retention-days: 7
