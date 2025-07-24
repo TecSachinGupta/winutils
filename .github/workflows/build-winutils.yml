@@ -18,6 +18,9 @@ jobs:
         run: |
           echo "RELEASE_TAG=rel/release-${{ github.event.inputs.hadoop_version }}" >> $env:GITHUB_ENV
           echo "DIST_VERSION=hadoop-${{ github.event.inputs.hadoop_version }}" >> $env:GITHUB_ENV
+      
+      - name: Install Git (for Bash)
+        run: choco install git -y
 
       # Enable long paths in Git
       - name: Enable long paths
@@ -59,13 +62,24 @@ jobs:
 
       # Install Protocol Buffers (protoc)
       - name: Install Protocol Buffers
-        run: choco install protoc -y
+        run: |
+          choco install protoc -y
+          echo "C:\Program Files\protoc\bin" >> $GITHUB_PATH
 
       # Install Python
       - name: Install Python 3
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
+
+      - name: Debug PATH and Java version
+        shell: bash
+        run: |
+          echo "JAVA_HOME=$JAVA_HOME"
+          java -version
+          mvn -v
+          where bash
+          where protoc || echo "protoc not found"
 
       # Build Hadoop native binaries
       - name: Build Hadoop native binaries
@@ -76,7 +90,7 @@ jobs:
 
       # List the final artifacts
       - name: List built binaries
-        shell: cmd
+        shell: bash
         run: |
           dir hadoop\hadoop-dist\target\${{ env.DIST_VERSION }}\bin
           dir hadoop\hadoop-dist\target\${{ env.DIST_VERSION }}\lib
