@@ -56,7 +56,8 @@ jobs:
         shell: cmd
         run: |
           cd hadoop
-          mvn clean install -Pdist,native -DskipTests -Dtar -X -e
+          mvn clean package -DskipTests -Pdist  -Dmaven.javadoc.skip=true 
+        #mvn clean install -Pdist,native -DskipTests -Dtar -X -e
 
       - name: List built binaries
         shell: cmd
