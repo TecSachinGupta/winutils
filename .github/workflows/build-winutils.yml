@@ -20,7 +20,8 @@ jobs:
       - name: Build
         shell: cmd
         run: |
-          mvn clean install -Pdist,native -DskipTests -Dtar
+          mvn clean package -DskipTests -Pdist  -Dmaven.javadoc.skip=true 
+        # mvn clean install -Pdist,native -DskipTests -Dtar
       - name: Upload Winutils
         uses: actions/upload-artifact@v4
         with:
