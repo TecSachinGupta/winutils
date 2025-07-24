@@ -36,7 +36,7 @@ jobs:
         uses: actions/setup-java@v3
         with:
           distribution: temurin
-          java-version: 11
+          java-version: 8
 
       # Setup Maven
       - name: Set up Maven
@@ -47,6 +47,8 @@ jobs:
       # Setup Visual Studio and MSVC
       - name: Set up MSVC build tools
         uses: ilammy/msvc-dev-cmd@v1
+        with:
+          vs-version: '2019'
 
       - name: Set up Visual Studio Build Tools
         uses: microsoft/setup-msbuild@v1.3.1
