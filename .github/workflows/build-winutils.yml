@@ -3,7 +3,7 @@ name: Build Hadoop Native Binaries for Windows
 on:
   workflow_dispatch:
     inputs:
-      hadoop_versions:
+      hadoop_version:
         description: 'Comma-separated list of Hadoop versions (e.g., 3.3.6,3.4.1)'
         required: true
         default: '3.4.1'
@@ -19,7 +19,7 @@ jobs:
       - name: Set matrix from input
         id: set-matrix
         run: |
-          versions="${{ github.event.inputs.hadoop_versions }}"
+          versions="${{ github.event.inputs.hadoop_version }}"
           versions_json=$(echo "$versions" | jq -R 'split(",") | map(gsub("^\\s+|\\s+$"; ""))')
           echo "matrix={\"version\": $versions_json}" >> "$GITHUB_OUTPUT"
         shell: bash
