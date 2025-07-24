@@ -332,16 +332,16 @@ jobs:
           
           # Create build status file
           $buildLog = @"
-Build attempted with multiple strategies:
-1. Native-only build first, then full build
-2. Skip pre-dist phase build
-3. Individual module builds
-
-Native libraries found: $env:NATIVE_LIBS_FOUND
-Artifacts packaged: $artifactsFound
-
-For detailed build logs, check the GitHub Actions build logs.
-"@
+          Build attempted with multiple strategies:
+          1. Native-only build first, then full build
+          2. Skip pre-dist phase build
+          3. Individual module builds
+          
+          Native libraries found: $env:NATIVE_LIBS_FOUND
+          Artifacts packaged: $artifactsFound
+          
+          For detailed build logs, check the GitHub Actions build logs.
+          "@
           
           $buildLog | Out-File -FilePath "$outputDir\BUILD_LOG.txt" -Encoding UTF8
           
