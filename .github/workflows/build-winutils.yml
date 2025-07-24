@@ -72,7 +72,9 @@ jobs:
           python-version: '3.x'
 
       - name: Install Ninja
-        run: choco install ninja -y
+        run: |
+          choco install ninja -y
+          echo "$env:ChocolateyInstall\\bin" >> $env:GITHUB_PATH
 
       - name: Build zlib from source
         run: |
@@ -80,9 +82,10 @@ jobs:
           cd zlib
           mkdir build
           cd build
-          cmake .. -DCMAKE_INSTALL_PREFIX=C:/zlib
-          cmake --build . --config Release
-          echo "C:/zlib" >> $GITHUB_PATH
+          cmake .. -G "Ninja" -DCMAKE_INSTALL_PREFIX=C:/zlib
+          ninja
+          ninja install
+          echo "C:/zlib/bin" >> $GITHUB_PATH
       
       - name: Build Snappy from source
         run: |
@@ -90,10 +93,10 @@ jobs:
           cd snappy
           mkdir build
           cd build
-          cmake .. -DCMAKE_INSTALL_PREFIX=C:/snappy
-          cmake --build . --config Release
-          echo "C:/snappy" >> $GITHUB_PATH
-
+          cmake .. -G "Ninja" -DCMAKE_INSTALL_PREFIX=C:/snappy
+          ninja
+          ninja install
+          echo "C:/snappy/bin" >> $GITHUB_PATH
 
       - name: Debug PATH and Java version
         shell: bash
