@@ -20,7 +20,7 @@ jobs:
       - name: Build
         shell: cmd
         run: |
-          git checkout rel/release-3.4.1
+          # git checkout rel/release-3.4.1
           mvn clean install -Pdist,native -DskipTests -Dtar
       - name: Upload Winutils
         uses: actions/upload-artifact@v4
