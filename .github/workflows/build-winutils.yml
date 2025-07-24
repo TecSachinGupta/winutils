@@ -46,6 +46,12 @@ jobs:
       - name: Set up MSVC build tools
         uses: ilammy/msvc-dev-cmd@v1
 
+      - name: Add Python and CMake
+        run: |
+          choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
+          choco install python --pre -y
+          refreshenv
+
       - name: Build Hadoop native binaries
         shell: cmd
         run: |
