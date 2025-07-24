@@ -35,11 +35,18 @@ jobs:
           path: hadoop
 
       # Setup Java (depends on version of Hadoop)
-      - name: Set up Java 11 (Temurin)
+      - name: Set up Java 8 (Temurin)
         uses: actions/setup-java@v3
         with:
           distribution: temurin
           java-version: 8
+          
+      - name: Cache Maven dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.m2/repository
+          key: maven-${{ runner.os }}-${{ hashFiles('**/pom.xml') }}
+          restore-keys: maven-${{ runner.os }}-
 
       # Setup Maven
       - name: Set up Maven
@@ -65,6 +72,11 @@ jobs:
         run: |
           choco install protoc -y
           echo "C:\Program Files\protoc\bin" >> $GITHUB_PATH
+      
+      - name: Install Native Dependencies
+        run: |
+          choco install zlib -y
+          choco install snappy -y
 
       # Install Python
       - name: Install Python 3
