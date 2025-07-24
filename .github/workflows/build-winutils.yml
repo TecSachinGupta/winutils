@@ -1,29 +1,37 @@
-# .github/workflows/build-winutils.yml
-name: Build Winutils
+name: Build Winutils for Hadoop 3.4.1
 
-on: [workflow_dispatch]
+on:
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout Hadoop source
+        run: |
+          git clone https://github.com/apache/hadoop.git
+          cd hadoop
+          git checkout rel/release-3.4.1
+
       - name: Set up JDK
         uses: actions/setup-java@v3
         with:
           java-version: 11
           distribution: temurin
-      - name: Install Maven
+
+      - name: Set up Maven
         uses: stCarolas/setup-maven@v4
         with:
           maven-version: 3.9.6
-      - name: Build
+
+      - name: Build Hadoop native
         shell: cmd
         run: |
-          mvn clean package -DskipTests -Pdist  -Dmaven.javadoc.skip=true 
-        # mvn clean install -Pdist,native -DskipTests -Dtar
-      - name: Upload Winutils
+          cd hadoop
+          mvn clean install -Pdist,native -DskipTests -Dtar
+
+      - name: Upload winutils.exe
         uses: actions/upload-artifact@v4
         with:
           name: winutils
-          path: hadoop-dist/target/**/bin/winutils.exe
+          path: hadoop/hadoop-dist/target/**/bin/**
