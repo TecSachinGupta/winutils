@@ -155,19 +155,19 @@ jobs:
           
           # Create README with build info
           $readme = @"
-Hadoop $version Native Binaries for Windows
-Build Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC')
-Source: Apache Hadoop $version (tag: ${{ env.RELEASE_TAG }})
-
-Contents:
-- lib/native/: Native libraries (.dll files)
-- bin/: Windows utilities including winutils.exe
-
-These binaries were built using:
-- Java 11 (Temurin)
-- Visual Studio 2022
-- Maven with -Pdist,native profile
-"@
+            Hadoop $version Native Binaries for Windows
+            Build Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC')
+            Source: Apache Hadoop $version (tag: ${{ env.RELEASE_TAG }})
+            
+            Contents:
+            - lib/native/: Native libraries (.dll files)
+            - bin/: Windows utilities including winutils.exe
+            
+            These binaries were built using:
+            - Java 11 (Temurin)
+            - Visual Studio 2022
+            - Maven with -Pdist,native profile
+            "@
           
           $readme | Out-File -FilePath "$outputDir\README.txt" -Encoding UTF8
           
