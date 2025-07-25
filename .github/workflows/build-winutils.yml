@@ -133,7 +133,7 @@ jobs:
           
           Write-Host "=== Phase 1: Basic Project Setup ==="
           try {
-            $setupResult = cmd /c "`"$vcVarsPath`" && mvn clean validate -q -DskipTests -Dmaven.javadoc.skip=true" 2>&1
+            $setupResult = cmd.exe /c "`"$vcVarsPath`" `&`& mvn clean validate -q -DskipTests -Dmaven.javadoc.skip=true" 2>&1
             Write-Host "Setup completed. Output: $setupResult"
             if ($LASTEXITCODE -ne 0) {
               Write-Host "Warning: Setup had non-zero exit code but continuing..."
@@ -156,7 +156,7 @@ jobs:
             if (Test-Path $module) {
               Write-Host "Building core module: $module"
               try {
-                $result = cmd /c "`"$vcVarsPath`" && mvn compile -pl $module -q -DskipTests -Dmaven.javadoc.skip=true" 2>&1
+                $result = cmd.exe /c "`"$vcVarsPath`" `&`& mvn compile -pl $module -q -DskipTests -Dmaven.javadoc.skip=true" 2>&1
                 if ($LASTEXITCODE -ne 0) {
                   Write-Host "Warning: $module build had issues but continuing: $result"
                 } else {
@@ -175,7 +175,7 @@ jobs:
           # Strategy 1: Build hadoop-common native only
           Write-Host "Building hadoop-common native libraries..."
           try {
-            $commonResult = cmd /c "`"$vcVarsPath`" && mvn compile -pl hadoop-common-project/hadoop-common -Pnative -DskipTests -Dmaven.javadoc.skip=true -Dtar -q" 2>&1
+            $commonResult = cmd.exe /c "`"$vcVarsPath`" `&`& mvn compile -pl hadoop-common-project/hadoop-common -Pnative -DskipTests -Dmaven.javadoc.skip=true -Dtar -q" 2>&1
             Write-Host "Common native result: $commonResult"
             $commonSuccess = $LASTEXITCODE -eq 0
             if ($commonSuccess) {
@@ -191,7 +191,7 @@ jobs:
           # Strategy 2: Build hdfs native 
           Write-Host "Building hadoop-hdfs native libraries..."
           try {
-            $hdfsResult = cmd /c "`"$vcVarsPath`" && mvn compile -pl hadoop-hdfs-project/hadoop-hdfs -Pnative -DskipTests -Dmaven.javadoc.skip=true -q" 2>&1
+            $hdfsResult = cmd.exe /c "`"$vcVarsPath`" `&`& mvn compile -pl hadoop-hdfs-project/hadoop-hdfs -Pnative -DskipTests -Dmaven.javadoc.skip=true -q" 2>&1
             Write-Host "HDFS native result: $hdfsResult"
             $hdfsSuccess = $LASTEXITCODE -eq 0
             if ($hdfsSuccess) {
@@ -217,12 +217,12 @@ jobs:
               }
               
               Write-Host "Configuring CMake build..."
-              $cmakeConfig = cmd /c "`"$vcVarsPath`" && cmake . -B build -G `"Visual Studio 17 2022`" -A x64 -DJVM_ARCH_DATA_MODEL=64 -DREQUIRE_LIBWEBHDFS=OFF -DREQUIRE_SNAPPY=OFF" 2>&1
+              $cmakeConfig = cmd.exe /c "`"$vcVarsPath`" `&`& cmake . -B build -G `"Visual Studio 17 2022`" -A x64 -DJVM_ARCH_DATA_MODEL=64 -DREQUIRE_LIBWEBHDFS=OFF -DREQUIRE_SNAPPY=OFF" 2>&1
               Write-Host "CMake config: $cmakeConfig"
               
               if ($LASTEXITCODE -eq 0) {
                 Write-Host "Building with CMake..."
-                $cmakeBuild = cmd /c "`"$vcVarsPath`" && cmake --build build --config Release --target hadoop" 2>&1
+                $cmakeBuild = cmd.exe /c "`"$vcVarsPath`" `&`& cmake --build build --config Release --target hadoop" 2>&1
                 Write-Host "CMake build: $cmakeBuild"
                 $cmakeSuccess = $LASTEXITCODE -eq 0
                 if ($cmakeSuccess) {
@@ -262,7 +262,7 @@ jobs:
                 foreach ($sln in $slnFiles) {
                   Write-Host "Building solution: $($sln.Name)"
                   try {
-                    $slnResult = cmd /c "`"$vcVarsPath`" && msbuild `"$($sln.FullName)`" /p:Configuration=Release /p:Platform=x64 /m" 2>&1
+                    $slnResult = cmd.exe /c "`"$vcVarsPath`" `&`& msbuild `"$($sln.FullName)`" /p:Configuration=Release /p:Platform=x64 /m" 2>&1
                     Write-Host "Solution build result: $slnResult"
                     if ($LASTEXITCODE -eq 0) {
                       Write-Host "✓ Solution $($sln.Name) built successfully"
@@ -278,7 +278,7 @@ jobs:
                 foreach ($proj in $vcxprojFiles) {
                   Write-Host "Building project: $($proj.Name)"
                   try {
-                    $projResult = cmd /c "`"$vcVarsPath`" && msbuild `"$($proj.FullName)`" /p:Configuration=Release /p:Platform=x64" 2>&1
+                    $projResult = cmd.exe /c "`"$vcVarsPath`" `&`& msbuild `"$($proj.FullName)`" /p:Configuration=Release /p:Platform=x64" 2>&1
                     Write-Host "Project build result: $projResult"
                     if ($LASTEXITCODE -eq 0) {
                       Write-Host "✓ Project $($proj.Name) built successfully"
