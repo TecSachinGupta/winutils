@@ -153,7 +153,7 @@ jobs:
           $buildScript = @"
           call "$env:VCVARS_PATH"
           mvn compile -pl hadoop-common-project/hadoop-common -Pnative -DskipTests -Dmaven.javadoc.skip=true -Dtar -q
-      "@
+          "@
           
           $buildScript | Out-File -FilePath "build_common.bat" -Encoding ascii
           
@@ -177,7 +177,7 @@ jobs:
           $buildScript = @"
           call "$env:VCVARS_PATH"
           mvn compile -pl hadoop-hdfs-project/hadoop-hdfs -Pnative -DskipTests -Dmaven.javadoc.skip=true -q
-            "@
+          "@
           
           $buildScript | Out-File -FilePath "build_hdfs.bat" -Encoding ascii
           
@@ -210,7 +210,7 @@ jobs:
             call "$env:VCVARS_PATH"
             cmake . -B build -G "Visual Studio 17 2022" -A x64 -DJVM_ARCH_DATA_MODEL=64 -DREQUIRE_LIBWEBHDFS=OFF -DREQUIRE_SNAPPY=OFF
             cmake --build build --config Release --target hadoop
-    "@
+            "@
             
             $buildScript | Out-File -FilePath "cmake_build.bat" -Encoding ascii
             
@@ -253,7 +253,7 @@ jobs:
                 $buildScript = @"
                 call "$env:VCVARS_PATH"
                 msbuild "$($sln.FullName)" /p:Configuration=Release /p:Platform=x64 /m
-"@
+                "@
                 
                 $buildScript | Out-File -FilePath "build_sln.bat" -Encoding ascii
                 
@@ -274,7 +274,7 @@ jobs:
                 $buildScript = @"
                 call "$env:VCVARS_PATH"
                 msbuild "$($proj.FullName)" /p:Configuration=Release /p:Platform=x64
-"@
+                "@
                 
                 $buildScript | Out-File -FilePath "build_proj.bat" -Encoding ascii
                 
