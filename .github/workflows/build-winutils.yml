@@ -89,16 +89,22 @@ jobs:
             ${{ runner.os }}-maven-hadoop-${{ matrix.version }}-
             ${{ runner.os }}-maven-
 
-      - name: Build Hadoop Native Components Only
+      - name: Find Visual Studio
         shell: powershell
         run: |
           # Locate Visual Studio vcvars64.bat using vswhere
           $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vcVarsPath = ""
+          
           if (Test-Path $vsWhere) {
             $vsPath = & $vsWhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
-            $vcVarsPath = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
-          } else {
-            # Fallback paths for different VS installations
+            if ($vsPath) {
+              $vcVarsPath = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+            }
+          }
+          
+          # Fallback paths for different VS installations
+          if (-not $vcVarsPath -or -not (Test-Path $vcVarsPath)) {
             $fallbackPaths = @(
               "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat",
               "${env:ProgramFiles}\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat",
@@ -114,208 +120,207 @@ jobs:
             }
           }
           
-          if (-not (Test-Path $vcVarsPath)) {
+          if (-not $vcVarsPath -or -not (Test-Path $vcVarsPath)) {
             Write-Host "ERROR: Could not find Visual Studio vcvars64.bat"
             exit 1
           }
           
-          Write-Host "Using Visual Studio vcvars64.bat at: $vcVarsPath"
-          
-          # Set up build environment
+          Write-Host "Found Visual Studio vcvars64.bat at: $vcVarsPath"
+          echo "VCVARS_PATH=$vcVarsPath" >> $env:GITHUB_ENV
+
+      - name: Setup Build Environment
+        shell: powershell
+        run: |
+          # Set up build environment variables
           $env:JAVA_HOME = $env:JAVA_HOME_11_X64
           $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
-          
-          # Skip problematic modules and focus on native components
-          # Note: MaxPermSize was removed in Java 8+, using modern JVM options
           $env:MAVEN_OPTS = "-Xmx2048m -Xms512m -XX:MetaspaceSize=256m -XX:MaxMetaspaceSize=512m"
           
+          # Save environment for subsequent steps
+          echo "JAVA_HOME=$env:JAVA_HOME" >> $env:GITHUB_ENV
+          echo "MAVEN_OPTS=$env:MAVEN_OPTS" >> $env:GITHUB_ENV
+          
+          Write-Host "Build environment configured:"
+          Write-Host "JAVA_HOME: $env:JAVA_HOME"
+          Write-Host "MAVEN_OPTS: $env:MAVEN_OPTS"
+
+      - name: Build Strategy 1 - Maven Native Common
+        shell: powershell
+        run: |
           Set-Location hadoop
+          Write-Host "=== Building hadoop-common with native profile ==="
           
-          Write-Host "=== Phase 1: Basic Project Setup ==="
-          try {
-            $setupResult = cmd.exe /c "`"$vcVarsPath`" `&`& mvn clean validate -q -DskipTests -Dmaven.javadoc.skip=true" 2>&1
-            Write-Host "Setup completed. Output: $setupResult"
-            if ($LASTEXITCODE -ne 0) {
-              Write-Host "Warning: Setup had non-zero exit code but continuing..."
-            }
-          } catch {
-            Write-Host "Setup failed with exception: $($_.Exception.Message)"
-            Write-Host "Continuing with build anyway..."
+          $buildScript = @"
+          call "$env:VCVARS_PATH"
+          mvn compile -pl hadoop-common-project/hadoop-common -Pnative -DskipTests -Dmaven.javadoc.skip=true -Dtar -q
+      "@
+          
+          $buildScript | Out-File -FilePath "build_common.bat" -Encoding ascii
+          
+          $result = cmd.exe /c "build_common.bat" 2>&1
+          Write-Host "Build output: $result"
+          
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "✓ Hadoop-common native build succeeded"
+            echo "COMMON_SUCCESS=true" >> $env:GITHUB_ENV
+          } else {
+            Write-Host "✗ Hadoop-common native build failed"
+            echo "COMMON_SUCCESS=false" >> $env:GITHUB_ENV
           }
+
+      - name: Build Strategy 2 - Maven Native HDFS
+        shell: powershell
+        run: |
+          Set-Location hadoop
+          Write-Host "=== Building hadoop-hdfs with native profile ==="
           
-          Write-Host "=== Phase 2: Build Core Dependencies ==="
-          $coreModules = @(
-            "hadoop-project",
-            "hadoop-project-dist", 
-            "hadoop-assemblies",
-            "hadoop-maven-plugins",
-            "hadoop-build-tools"
-          )
+          $buildScript = @"
+          call "$env:VCVARS_PATH"
+          mvn compile -pl hadoop-hdfs-project/hadoop-hdfs -Pnative -DskipTests -Dmaven.javadoc.skip=true -q
+            "@
           
-          foreach ($module in $coreModules) {
-            if (Test-Path $module) {
-              Write-Host "Building core module: $module"
-              try {
-                $result = cmd.exe /c "`"$vcVarsPath`" `&`& mvn compile -pl $module -q -DskipTests -Dmaven.javadoc.skip=true" 2>&1
-                if ($LASTEXITCODE -ne 0) {
-                  Write-Host "Warning: $module build had issues but continuing: $result"
-                } else {
-                  Write-Host "Successfully built: $module"
-                }
-              } catch {
-                Write-Host "Exception building $module : $($_.Exception.Message)"
-              }
-            } else {
-              Write-Host "Module not found: $module"
-            }
+          $buildScript | Out-File -FilePath "build_hdfs.bat" -Encoding ascii
+          
+          $result = cmd.exe /c "build_hdfs.bat" 2>&1
+          Write-Host "Build output: $result"
+          
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "✓ Hadoop-hdfs native build succeeded"
+            echo "HDFS_SUCCESS=true" >> $env:GITHUB_ENV
+          } else {
+            Write-Host "✗ Hadoop-hdfs native build failed"
+            echo "HDFS_SUCCESS=false" >> $env:GITHUB_ENV
           }
-          
-          Write-Host "=== Phase 3: Build Native Libraries with Targeted Approach ==="
-          
-          # Strategy 1: Build hadoop-common native only
-          Write-Host "Building hadoop-common native libraries..."
-          try {
-            $commonResult = cmd.exe /c "`"$vcVarsPath`" `&`& mvn compile -pl hadoop-common-project/hadoop-common -Pnative -DskipTests -Dmaven.javadoc.skip=true -Dtar -q" 2>&1
-            Write-Host "Common native result: $commonResult"
-            $commonSuccess = $LASTEXITCODE -eq 0
-            if ($commonSuccess) {
-              Write-Host "✓ Hadoop-common native build succeeded"
-            } else {
-              Write-Host "✗ Hadoop-common native build failed, but continuing..."
-            }
-          } catch {
-            Write-Host "✗ Exception in hadoop-common build: $($_.Exception.Message)"  
-            $commonSuccess = $false
-          }
-          
-          # Strategy 2: Build hdfs native 
-          Write-Host "Building hadoop-hdfs native libraries..."
-          try {
-            $hdfsResult = cmd.exe /c "`"$vcVarsPath`" `&`& mvn compile -pl hadoop-hdfs-project/hadoop-hdfs -Pnative -DskipTests -Dmaven.javadoc.skip=true -q" 2>&1
-            Write-Host "HDFS native result: $hdfsResult"
-            $hdfsSuccess = $LASTEXITCODE -eq 0
-            if ($hdfsSuccess) {
-              Write-Host "✓ Hadoop-hdfs native build succeeded"
-            } else {
-              Write-Host "✗ Hadoop-hdfs native build failed, but continuing..."
-            }
-          } catch {
-            Write-Host "✗ Exception in hadoop-hdfs build: $($_.Exception.Message)"
-            $hdfsSuccess = $false
-          }
-          
-          # Strategy 3: Direct CMake build for hadoop-common
-          Write-Host "=== Phase 4: Direct CMake Build ==="
-          $nativeDir = "hadoop-common-project\hadoop-common\src\main\native"
+
+      - name: Build Strategy 3 - Direct CMake
+        shell: powershell
+        run: |
+          $nativeDir = "hadoop\hadoop-common-project\hadoop-common\src\main\native"
           if (Test-Path $nativeDir) {
-            try {
-              Set-Location $nativeDir
-              
-              # Clean any existing build
-              if (Test-Path "build") { 
-                Remove-Item -Recurse -Force "build" -ErrorAction SilentlyContinue
-              }
-              
-              Write-Host "Configuring CMake build..."
-              $cmakeConfig = cmd.exe /c "`"$vcVarsPath`" `&`& cmake . -B build -G `"Visual Studio 17 2022`" -A x64 -DJVM_ARCH_DATA_MODEL=64 -DREQUIRE_LIBWEBHDFS=OFF -DREQUIRE_SNAPPY=OFF" 2>&1
-              Write-Host "CMake config: $cmakeConfig"
-              
-              if ($LASTEXITCODE -eq 0) {
-                Write-Host "Building with CMake..."
-                $cmakeBuild = cmd.exe /c "`"$vcVarsPath`" `&`& cmake --build build --config Release --target hadoop" 2>&1
-                Write-Host "CMake build: $cmakeBuild"
-                $cmakeSuccess = $LASTEXITCODE -eq 0
-                if ($cmakeSuccess) {
-                  Write-Host "✓ CMake build succeeded"
-                } else {
-                  Write-Host "✗ CMake build failed"
-                }
-              } else {
-                Write-Host "✗ CMake configuration failed"
-                $cmakeSuccess = $false
-              }
-              
-              Set-Location $env:GITHUB_WORKSPACE\hadoop
-            } catch {
-              Write-Host "✗ Exception in CMake build: $($_.Exception.Message)"
-              $cmakeSuccess = $false
-              Set-Location $env:GITHUB_WORKSPACE\hadoop
+            Set-Location $nativeDir
+            
+            Write-Host "=== Direct CMake build ==="
+            
+            # Clean any existing build
+            if (Test-Path "build") { 
+              Remove-Item -Recurse -Force "build" -ErrorAction SilentlyContinue
+            }
+            
+            $buildScript = @"
+            call "$env:VCVARS_PATH"
+            cmake . -B build -G "Visual Studio 17 2022" -A x64 -DJVM_ARCH_DATA_MODEL=64 -DREQUIRE_LIBWEBHDFS=OFF -DREQUIRE_SNAPPY=OFF
+            cmake --build build --config Release --target hadoop
+    "@
+            
+            $buildScript | Out-File -FilePath "cmake_build.bat" -Encoding ascii
+            
+            $result = cmd.exe /c "cmake_build.bat" 2>&1
+            Write-Host "CMake build output: $result"
+            
+            Set-Location $env:GITHUB_WORKSPACE
+            
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "✓ CMake build succeeded"
+              echo "CMAKE_SUCCESS=true" >> $env:GITHUB_ENV
+            } else {
+              Write-Host "✗ CMake build failed"
+              echo "CMAKE_SUCCESS=false" >> $env:GITHUB_ENV
             }
           } else {
-            Write-Host "✗ Native directory not found: $nativeDir"
-            $cmakeSuccess = $false
+            Write-Host "✗ Native directory not found"
+            echo "CMAKE_SUCCESS=false" >> $env:GITHUB_ENV
           }
-          
-          # Strategy 4: Build winutils directly
-          Write-Host "=== Phase 5: Building winutils directly ==="
-          $winutilsSuccess = $false
-          $winutilsDir = "hadoop-common-project\hadoop-common\src\main\winutils"
+
+      - name: Build Strategy 4 - MSBuild Winutils
+        shell: powershell
+        run: |
+          $winutilsDir = "hadoop\hadoop-common-project\hadoop-common\src\main\winutils"
           if (Test-Path $winutilsDir) {
-            try {
-              Set-Location $winutilsDir
-              
-              # Look for solution or project files
-              $slnFiles = Get-ChildItem -Filter "*.sln" -ErrorAction SilentlyContinue
-              $vcxprojFiles = Get-ChildItem -Filter "*.vcxproj" -ErrorAction SilentlyContinue
-              
-              if ($slnFiles) {
-                foreach ($sln in $slnFiles) {
-                  Write-Host "Building solution: $($sln.Name)"
-                  try {
-                    $slnResult = cmd.exe /c "`"$vcVarsPath`" `&`& msbuild `"$($sln.FullName)`" /p:Configuration=Release /p:Platform=x64 /m" 2>&1
-                    Write-Host "Solution build result: $slnResult"
-                    if ($LASTEXITCODE -eq 0) {
-                      Write-Host "✓ Solution $($sln.Name) built successfully"
-                      $winutilsSuccess = $true
-                    } else {
-                      Write-Host "✗ Solution $($sln.Name) build failed"
-                    }
-                  } catch {
-                    Write-Host "✗ Exception building solution $($sln.Name): $($_.Exception.Message)"
-                  }
+            Set-Location $winutilsDir
+            
+            Write-Host "=== Building winutils with MSBuild ==="
+            
+            # Look for solution or project files
+            $slnFiles = Get-ChildItem -Filter "*.sln" -ErrorAction SilentlyContinue
+            $vcxprojFiles = Get-ChildItem -Filter "*.vcxproj" -ErrorAction SilentlyContinue
+            
+            $winutilsSuccess = $false
+            
+            if ($slnFiles) {
+              foreach ($sln in $slnFiles) {
+                Write-Host "Building solution: $($sln.Name)"
+                
+                $buildScript = @"
+                call "$env:VCVARS_PATH"
+                msbuild "$($sln.FullName)" /p:Configuration=Release /p:Platform=x64 /m
+"@
+                
+                $buildScript | Out-File -FilePath "build_sln.bat" -Encoding ascii
+                
+                $result = cmd.exe /c "build_sln.bat" 2>&1
+                Write-Host "Solution build output: $result"
+                
+                if ($LASTEXITCODE -eq 0) {
+                  Write-Host "✓ Solution $($sln.Name) built successfully"
+                  $winutilsSuccess = $true
+                } else {
+                  Write-Host "✗ Solution $($sln.Name) build failed"
                 }
-              } elseif ($vcxprojFiles) {
-                foreach ($proj in $vcxprojFiles) {
-                  Write-Host "Building project: $($proj.Name)"
-                  try {
-                    $projResult = cmd.exe /c "`"$vcVarsPath`" `&`& msbuild `"$($proj.FullName)`" /p:Configuration=Release /p:Platform=x64" 2>&1
-                    Write-Host "Project build result: $projResult"
-                    if ($LASTEXITCODE -eq 0) {
-                      Write-Host "✓ Project $($proj.Name) built successfully"
-                      $winutilsSuccess = $true
-                    } else {
-                      Write-Host "✗ Project $($proj.Name) build failed"
-                    }
-                  } catch {
-                    Write-Host "✗ Exception building project $($proj.Name): $($_.Exception.Message)"
-                  }
-                }
-              } else {
-                Write-Host "✗ No Visual Studio solution or project files found in winutils directory"
               }
-              
-              Set-Location $env:GITHUB_WORKSPACE\hadoop
-            } catch {
-              Write-Host "✗ Exception in winutils build: $($_.Exception.Message)"
-              $winutilsSuccess = $false
-              Set-Location $env:GITHUB_WORKSPACE\hadoop
+            } elseif ($vcxprojFiles) {
+              foreach ($proj in $vcxprojFiles) {
+                Write-Host "Building project: $($proj.Name)"
+                
+                $buildScript = @"
+                call "$env:VCVARS_PATH"
+                msbuild "$($proj.FullName)" /p:Configuration=Release /p:Platform=x64
+"@
+                
+                $buildScript | Out-File -FilePath "build_proj.bat" -Encoding ascii
+                
+                $result = cmd.exe /c "build_proj.bat" 2>&1
+                Write-Host "Project build output: $result"
+                
+                if ($LASTEXITCODE -eq 0) {
+                  Write-Host "✓ Project $($proj.Name) built successfully"
+                  $winutilsSuccess = $true
+                } else {
+                  Write-Host "✗ Project $($proj.Name) build failed"
+                }
+              }
+            } else {
+              Write-Host "✗ No Visual Studio solution or project files found"
+            }
+            
+            Set-Location $env:GITHUB_WORKSPACE
+            
+            if ($winutilsSuccess) {
+              echo "WINUTILS_SUCCESS=true" >> $env:GITHUB_ENV
+            } else {
+              echo "WINUTILS_SUCCESS=false" >> $env:GITHUB_ENV
             }
           } else {
-            Write-Host "✗ Winutils directory not found: $winutilsDir"
+            Write-Host "✗ Winutils directory not found"
+            echo "WINUTILS_SUCCESS=false" >> $env:GITHUB_ENV
           }
-          
-          # Summary
+
+      - name: Build Summary
+        shell: powershell
+        run: |
           Write-Host "=== Build Summary ==="
-          Write-Host "Hadoop Common Native: $(if($commonSuccess){'SUCCESS'}else{'FAILED'})"
-          Write-Host "Hadoop HDFS Native: $(if($hdfsSuccess){'SUCCESS'}else{'FAILED'})"
-          Write-Host "CMake Direct Build: $(if($cmakeSuccess){'SUCCESS'}else{'FAILED'})"
-          Write-Host "Winutils Build: $(if($winutilsSuccess){'SUCCESS'}else{'FAILED'})"
+          Write-Host "Hadoop Common Native: $env:COMMON_SUCCESS"
+          Write-Host "Hadoop HDFS Native: $env:HDFS_SUCCESS"
+          Write-Host "CMake Direct Build: $env:CMAKE_SUCCESS"
+          Write-Host "Winutils Build: $env:WINUTILS_SUCCESS"
           
-          $anySuccess = $commonSuccess -or $hdfsSuccess -or $cmakeSuccess -or $winutilsSuccess
+          $anySuccess = ($env:COMMON_SUCCESS -eq "true") -or ($env:HDFS_SUCCESS -eq "true") -or ($env:CMAKE_SUCCESS -eq "true") -or ($env:WINUTILS_SUCCESS -eq "true")
+          
           if ($anySuccess) {
-            Write-Host "At least one build strategy succeeded!"
+            Write-Host "✓ At least one build strategy succeeded"
+            echo "BUILD_SUCCESS=true" >> $env:GITHUB_ENV
           } else {
-            Write-Host "All build strategies failed, but continuing to search for any existing binaries..."
+            Write-Host "✗ All build strategies failed"
+            echo "BUILD_SUCCESS=false" >> $env:GITHUB_ENV
           }
 
       - name: Comprehensive Native Library Search
@@ -330,15 +335,13 @@ jobs:
           $keyFiles = @("winutils.exe", "hadoop.dll", "hdfs.dll", "libwinutils.lib", "libhadoop.lib")
           
           $foundFiles = @()
-          $searchLocations = @()
           
           # Search in target directories first
           Write-Host "Searching target directories..."
           $targetDirs = Get-ChildItem -Recurse -Directory -Name "target" -ErrorAction SilentlyContinue
           foreach ($targetDir in $targetDirs) {
-            $fullTargetPath = $targetDir
-            if (Test-Path $fullTargetPath) {
-              $targetFiles = Get-ChildItem -Path $fullTargetPath -Recurse -Include $nativeExtensions -ErrorAction SilentlyContinue
+            if (Test-Path $targetDir) {
+              $targetFiles = Get-ChildItem -Path $targetDir -Recurse -Include $nativeExtensions -ErrorAction SilentlyContinue
               foreach ($file in $targetFiles) {
                 if ($file.Name -notmatch "test|surefire|javadoc" -and $file.Length -gt 0) {
                   Write-Host "Found in target: $($file.FullName) ($($file.Length) bytes)"
@@ -358,9 +361,8 @@ jobs:
           Write-Host "Searching build directories..."
           $buildDirs = Get-ChildItem -Recurse -Directory -Name "build", "Release", "Debug", "x64" -ErrorAction SilentlyContinue
           foreach ($buildDir in $buildDirs) {
-            $fullBuildPath = $buildDir
-            if (Test-Path $fullBuildPath) {
-              $buildFiles = Get-ChildItem -Path $fullBuildPath -Recurse -Include $nativeExtensions -ErrorAction SilentlyContinue
+            if (Test-Path $buildDir) {
+              $buildFiles = Get-ChildItem -Path $buildDir -Recurse -Include $nativeExtensions -ErrorAction SilentlyContinue
               foreach ($file in $buildFiles) {
                 if ($file.Length -gt 0) {
                   Write-Host "Found in build: $($file.FullName) ($($file.Length) bytes)"
@@ -506,6 +508,12 @@ jobs:
             3. MSBuild for Windows-specific utilities
             4. Comprehensive file system search for all artifacts
             
+            Build Results:
+            - Common Native: $env:COMMON_SUCCESS
+            - HDFS Native: $env:HDFS_SUCCESS  
+            - CMake Build: $env:CMAKE_SUCCESS
+            - Winutils Build: $env:WINUTILS_SUCCESS
+            
             Some components may be missing if specific build strategies failed.
             Check BUILD_LOG.txt for detailed information.
             
@@ -540,11 +548,10 @@ jobs:
             Files Packaged: $filesPackaged
             
             Build Strategies Attempted:
-            1. Maven with native profile on hadoop-common
-            2. Maven with native profile on hadoop-hdfs  
-            3. Direct CMake build in native source directory
-            4. Direct MSBuild on winutils projects
-            5. Comprehensive filesystem search for any built artifacts
+            1. Maven with native profile on hadoop-common: $env:COMMON_SUCCESS
+            2. Maven with native profile on hadoop-hdfs: $env:HDFS_SUCCESS
+            3. Direct CMake build in native source directory: $env:CMAKE_SUCCESS
+            4. Direct MSBuild on winutils projects: $env:WINUTILS_SUCCESS
             
             For complete build logs, refer to the GitHub Actions workflow execution.
             
@@ -592,6 +599,7 @@ jobs:
           path: |
             found_files.json
             hadoop/**/*.log
+            hadoop/**/*.bat
             hadoop/**/CMakeFiles/**/*.log
             hadoop/**/target/surefire-reports/
           retention-days: 7
