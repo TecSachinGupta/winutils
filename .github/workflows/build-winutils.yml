@@ -92,9 +92,6 @@ jobs:
       - name: Build Hadoop Native Components Only
         shell: powershell
         run: |
-          # 🔥 Clear problematic Maven JVM options
-          Remove-Item Env:\MAVEN_OPTS -ErrorAction SilentlyContinue
-
           # Locate Visual Studio vcvars64.bat using vswhere
           $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           if (Test-Path $vsWhere) {
@@ -134,6 +131,8 @@ jobs:
           Set-Location hadoop
           
           Write-Host "=== Phase 1: Basic Project Setup ==="
+          # Remove legacy JVM options
+          $env:MAVEN_OPTS = ""
           $setupResult = cmd /c "`"$vcVarsPath`" && mvn clean validate -q -DskipTests -Dmaven.javadoc.skip=true" 2>&1
           Write-Host "Setup result: $setupResult"
           
