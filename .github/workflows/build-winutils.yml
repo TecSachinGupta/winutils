@@ -126,15 +126,22 @@ jobs:
           $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
           
           # Skip problematic modules and focus on native components
-          $env:MAVEN_OPTS = "-Xmx2048m -XX:MaxPermSize=512m"
+          # Note: MaxPermSize was removed in Java 8+, using modern JVM options
+          $env:MAVEN_OPTS = "-Xmx2048m -Xms512m -XX:MetaspaceSize=256m -XX:MaxMetaspaceSize=512m"
           
           Set-Location hadoop
           
           Write-Host "=== Phase 1: Basic Project Setup ==="
-          # Remove legacy JVM options
-          $env:MAVEN_OPTS = ""
-          $setupResult = cmd /c "`"$vcVarsPath`" && mvn clean validate -q -DskipTests -Dmaven.javadoc.skip=true" 2>&1
-          Write-Host "Setup result: $setupResult"
+          try {
+            $setupResult = cmd /c "`"$vcVarsPath`" && mvn clean validate -q -DskipTests -Dmaven.javadoc.skip=true" 2>&1
+            Write-Host "Setup completed. Output: $setupResult"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "Warning: Setup had non-zero exit code but continuing..."
+            }
+          } catch {
+            Write-Host "Setup failed with exception: $($_.Exception.Message)"
+            Write-Host "Continuing with build anyway..."
+          }
           
           Write-Host "=== Phase 2: Build Core Dependencies ==="
           $coreModules = @(
@@ -148,10 +155,18 @@ jobs:
           foreach ($module in $coreModules) {
             if (Test-Path $module) {
               Write-Host "Building core module: $module"
-              $result = cmd /c "`"$vcVarsPath`" && mvn compile -pl $module -q -DskipTests -Dmaven.javadoc.skip=true" 2>&1
-              if ($LASTEXITCODE -ne 0) {
-                Write-Host "Warning: $module build had issues: $result"
+              try {
+                $result = cmd /c "`"$vcVarsPath`" && mvn compile -pl $module -q -DskipTests -Dmaven.javadoc.skip=true" 2>&1
+                if ($LASTEXITCODE -ne 0) {
+                  Write-Host "Warning: $module build had issues but continuing: $result"
+                } else {
+                  Write-Host "Successfully built: $module"
+                }
+              } catch {
+                Write-Host "Exception building $module : $($_.Exception.Message)"
               }
+            } else {
+              Write-Host "Module not found: $module"
             }
           }
           
@@ -159,42 +174,75 @@ jobs:
           
           # Strategy 1: Build hadoop-common native only
           Write-Host "Building hadoop-common native libraries..."
-          $commonResult = cmd /c "`"$vcVarsPath`" && mvn compile -pl hadoop-common-project/hadoop-common -Pnative -DskipTests -Dmaven.javadoc.skip=true -Dtar -q" 2>&1
-          Write-Host "Common native result: $commonResult"
-          $commonSuccess = $LASTEXITCODE -eq 0
+          try {
+            $commonResult = cmd /c "`"$vcVarsPath`" && mvn compile -pl hadoop-common-project/hadoop-common -Pnative -DskipTests -Dmaven.javadoc.skip=true -Dtar -q" 2>&1
+            Write-Host "Common native result: $commonResult"
+            $commonSuccess = $LASTEXITCODE -eq 0
+            if ($commonSuccess) {
+              Write-Host "✓ Hadoop-common native build succeeded"
+            } else {
+              Write-Host "✗ Hadoop-common native build failed, but continuing..."
+            }
+          } catch {
+            Write-Host "✗ Exception in hadoop-common build: $($_.Exception.Message)"  
+            $commonSuccess = $false
+          }
           
           # Strategy 2: Build hdfs native 
           Write-Host "Building hadoop-hdfs native libraries..."
-          $hdfsResult = cmd /c "`"$vcVarsPath`" && mvn compile -pl hadoop-hdfs-project/hadoop-hdfs -Pnative -DskipTests -Dmaven.javadoc.skip=true -q" 2>&1
-          Write-Host "HDFS native result: $hdfsResult"
-          $hdfsSuccess = $LASTEXITCODE -eq 0
+          try {
+            $hdfsResult = cmd /c "`"$vcVarsPath`" && mvn compile -pl hadoop-hdfs-project/hadoop-hdfs -Pnative -DskipTests -Dmaven.javadoc.skip=true -q" 2>&1
+            Write-Host "HDFS native result: $hdfsResult"
+            $hdfsSuccess = $LASTEXITCODE -eq 0
+            if ($hdfsSuccess) {
+              Write-Host "✓ Hadoop-hdfs native build succeeded"
+            } else {
+              Write-Host "✗ Hadoop-hdfs native build failed, but continuing..."
+            }
+          } catch {
+            Write-Host "✗ Exception in hadoop-hdfs build: $($_.Exception.Message)"
+            $hdfsSuccess = $false
+          }
           
           # Strategy 3: Direct CMake build for hadoop-common
           Write-Host "=== Phase 4: Direct CMake Build ==="
           $nativeDir = "hadoop-common-project\hadoop-common\src\main\native"
           if (Test-Path $nativeDir) {
-            Set-Location $nativeDir
-            
-            # Clean any existing build
-            if (Test-Path "build") { 
-              Remove-Item -Recurse -Force "build" -ErrorAction SilentlyContinue
-            }
-            
-            Write-Host "Configuring CMake build..."
-            $cmakeConfig = cmd /c "`"$vcVarsPath`" && cmake . -B build -G `"Visual Studio 17 2022`" -A x64 -DJVM_ARCH_DATA_MODEL=64 -DREQUIRE_LIBWEBHDFS=OFF -DREQUIRE_SNAPPY=OFF" 2>&1
-            Write-Host "CMake config: $cmakeConfig"
-            
-            if ($LASTEXITCODE -eq 0) {
-              Write-Host "Building with CMake..."
-              $cmakeBuild = cmd /c "`"$vcVarsPath`" && cmake --build build --config Release --target hadoop" 2>&1
-              Write-Host "CMake build: $cmakeBuild"
-              $cmakeSuccess = $LASTEXITCODE -eq 0
-            } else {
+            try {
+              Set-Location $nativeDir
+              
+              # Clean any existing build
+              if (Test-Path "build") { 
+                Remove-Item -Recurse -Force "build" -ErrorAction SilentlyContinue
+              }
+              
+              Write-Host "Configuring CMake build..."
+              $cmakeConfig = cmd /c "`"$vcVarsPath`" && cmake . -B build -G `"Visual Studio 17 2022`" -A x64 -DJVM_ARCH_DATA_MODEL=64 -DREQUIRE_LIBWEBHDFS=OFF -DREQUIRE_SNAPPY=OFF" 2>&1
+              Write-Host "CMake config: $cmakeConfig"
+              
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "Building with CMake..."
+                $cmakeBuild = cmd /c "`"$vcVarsPath`" && cmake --build build --config Release --target hadoop" 2>&1
+                Write-Host "CMake build: $cmakeBuild"
+                $cmakeSuccess = $LASTEXITCODE -eq 0
+                if ($cmakeSuccess) {
+                  Write-Host "✓ CMake build succeeded"
+                } else {
+                  Write-Host "✗ CMake build failed"
+                }
+              } else {
+                Write-Host "✗ CMake configuration failed"
+                $cmakeSuccess = $false
+              }
+              
+              Set-Location $env:GITHUB_WORKSPACE\hadoop
+            } catch {
+              Write-Host "✗ Exception in CMake build: $($_.Exception.Message)"
               $cmakeSuccess = $false
+              Set-Location $env:GITHUB_WORKSPACE\hadoop
             }
-            
-            Set-Location $env:GITHUB_WORKSPACE\hadoop
           } else {
+            Write-Host "✗ Native directory not found: $nativeDir"
             $cmakeSuccess = $false
           }
           
@@ -203,33 +251,57 @@ jobs:
           $winutilsSuccess = $false
           $winutilsDir = "hadoop-common-project\hadoop-common\src\main\winutils"
           if (Test-Path $winutilsDir) {
-            Set-Location $winutilsDir
-            
-            # Look for solution or project files
-            $slnFiles = Get-ChildItem -Filter "*.sln" -ErrorAction SilentlyContinue
-            $vcxprojFiles = Get-ChildItem -Filter "*.vcxproj" -ErrorAction SilentlyContinue
-            
-            if ($slnFiles) {
-              foreach ($sln in $slnFiles) {
-                Write-Host "Building solution: $($sln.Name)"
-                $slnResult = cmd /c "`"$vcVarsPath`" && msbuild `"$($sln.FullName)`" /p:Configuration=Release /p:Platform=x64 /m" 2>&1
-                Write-Host "Solution build result: $slnResult"
-                if ($LASTEXITCODE -eq 0) {
-                  $winutilsSuccess = $true
+            try {
+              Set-Location $winutilsDir
+              
+              # Look for solution or project files
+              $slnFiles = Get-ChildItem -Filter "*.sln" -ErrorAction SilentlyContinue
+              $vcxprojFiles = Get-ChildItem -Filter "*.vcxproj" -ErrorAction SilentlyContinue
+              
+              if ($slnFiles) {
+                foreach ($sln in $slnFiles) {
+                  Write-Host "Building solution: $($sln.Name)"
+                  try {
+                    $slnResult = cmd /c "`"$vcVarsPath`" && msbuild `"$($sln.FullName)`" /p:Configuration=Release /p:Platform=x64 /m" 2>&1
+                    Write-Host "Solution build result: $slnResult"
+                    if ($LASTEXITCODE -eq 0) {
+                      Write-Host "✓ Solution $($sln.Name) built successfully"
+                      $winutilsSuccess = $true
+                    } else {
+                      Write-Host "✗ Solution $($sln.Name) build failed"
+                    }
+                  } catch {
+                    Write-Host "✗ Exception building solution $($sln.Name): $($_.Exception.Message)"
+                  }
                 }
-              }
-            } elseif ($vcxprojFiles) {
-              foreach ($proj in $vcxprojFiles) {
-                Write-Host "Building project: $($proj.Name)"
-                $projResult = cmd /c "`"$vcVarsPath`" && msbuild `"$($proj.FullName)`" /p:Configuration=Release /p:Platform=x64" 2>&1
-                Write-Host "Project build result: $projResult"
-                if ($LASTEXITCODE -eq 0) {
-                  $winutilsSuccess = $true
+              } elseif ($vcxprojFiles) {
+                foreach ($proj in $vcxprojFiles) {
+                  Write-Host "Building project: $($proj.Name)"
+                  try {
+                    $projResult = cmd /c "`"$vcVarsPath`" && msbuild `"$($proj.FullName)`" /p:Configuration=Release /p:Platform=x64" 2>&1
+                    Write-Host "Project build result: $projResult"
+                    if ($LASTEXITCODE -eq 0) {
+                      Write-Host "✓ Project $($proj.Name) built successfully"
+                      $winutilsSuccess = $true
+                    } else {
+                      Write-Host "✗ Project $($proj.Name) build failed"
+                    }
+                  } catch {
+                    Write-Host "✗ Exception building project $($proj.Name): $($_.Exception.Message)"
+                  }
                 }
+              } else {
+                Write-Host "✗ No Visual Studio solution or project files found in winutils directory"
               }
+              
+              Set-Location $env:GITHUB_WORKSPACE\hadoop
+            } catch {
+              Write-Host "✗ Exception in winutils build: $($_.Exception.Message)"
+              $winutilsSuccess = $false
+              Set-Location $env:GITHUB_WORKSPACE\hadoop
             }
-            
-            Set-Location $env:GITHUB_WORKSPACE\hadoop
+          } else {
+            Write-Host "✗ Winutils directory not found: $winutilsDir"
           }
           
           # Summary
@@ -406,82 +478,82 @@ jobs:
           }
           
           $readme = @"
-          # Hadoop $version Native Binaries for Windows
-          
-          **Build Date:** $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC')  
-          **Build Status:** $buildStatus  
-          **Source:** Apache Hadoop $version (tag: ${{ env.RELEASE_TAG }})  
-          **Files Packaged:** $filesPackaged
-          
-          ## Contents
-          
-          - **lib/native/**: Native libraries (.dll, .lib files)
-          - **bin/**: Essential Windows utilities (winutils.exe, hadoop.exe)
-          - **sbin/**: Additional system utilities
-          
-          ## Installation
-          
-          1. Extract this archive to your desired location
-          2. Set environment variable: `HADOOP_HOME=<path-to-extracted-folder>`
-          3. Add to PATH: `%HADOOP_HOME%\bin`
-          4. Verify installation: `winutils.exe` (should show usage info)
-          
-          ## Build Information
-          
-          This package was built using multiple strategies:
-          1. Maven native profile compilation
-          2. Direct CMake builds for native components  
-          3. MSBuild for Windows-specific utilities
-          4. Comprehensive file system search for all artifacts
-          
-          Some components may be missing if specific build strategies failed.
-          Check BUILD_LOG.txt for detailed information.
-          
-          ## Troubleshooting
-          
-          If you encounter issues:
-          - Ensure Visual C++ Redistributable is installed
-          - Check that all .dll files are in lib/native/
-          - Verify winutils.exe has execution permissions
-          - See GitHub Actions logs for build details
-          
-          ## Notes
-          
-          These binaries are built from official Apache Hadoop source code.
-          For production use, consider building from source in your target environment.
-          "@
+            # Hadoop $version Native Binaries for Windows
+            
+            **Build Date:** $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC')  
+            **Build Status:** $buildStatus  
+            **Source:** Apache Hadoop $version (tag: ${{ env.RELEASE_TAG }})  
+            **Files Packaged:** $filesPackaged
+            
+            ## Contents
+            
+            - **lib/native/**: Native libraries (.dll, .lib files)
+            - **bin/**: Essential Windows utilities (winutils.exe, hadoop.exe)
+            - **sbin/**: Additional system utilities
+            
+            ## Installation
+            
+            1. Extract this archive to your desired location
+            2. Set environment variable: `HADOOP_HOME=<path-to-extracted-folder>`
+            3. Add to PATH: `%HADOOP_HOME%\bin`
+            4. Verify installation: `winutils.exe` (should show usage info)
+            
+            ## Build Information
+            
+            This package was built using multiple strategies:
+            1. Maven native profile compilation
+            2. Direct CMake builds for native components  
+            3. MSBuild for Windows-specific utilities
+            4. Comprehensive file system search for all artifacts
+            
+            Some components may be missing if specific build strategies failed.
+            Check BUILD_LOG.txt for detailed information.
+            
+            ## Troubleshooting
+            
+            If you encounter issues:
+            - Ensure Visual C++ Redistributable is installed
+            - Check that all .dll files are in lib/native/
+            - Verify winutils.exe has execution permissions
+            - See GitHub Actions logs for build details
+            
+            ## Notes
+            
+            These binaries are built from official Apache Hadoop source code.
+            For production use, consider building from source in your target environment.
+            "@
           
           $readme | Out-File -FilePath "$outputDir\README.md" -Encoding UTF8
           
           # Create detailed build log
           $buildLog = @"
-          Hadoop $version Windows Native Build Log
-          ========================================
-          
-          Build Environment:
-          - OS: Windows Server (GitHub Actions)
-          - Java: 11 (Temurin)
-          - Visual Studio: 2022
-          - Build Tools: Maven, CMake, MSBuild
-          
-          Native Files Found: $env:NATIVE_FILES_FOUND
-          Files Packaged: $filesPackaged
-          
-          Build Strategies Attempted:
-          1. Maven with native profile on hadoop-common
-          2. Maven with native profile on hadoop-hdfs  
-          3. Direct CMake build in native source directory
-          4. Direct MSBuild on winutils projects
-          5. Comprehensive filesystem search for any built artifacts
-          
-          For complete build logs, refer to the GitHub Actions workflow execution.
-          
-          If this package is missing expected files, the build may have encountered
-          platform-specific issues. Consider:
-          - Using official Hadoop distributions when available
-          - Building in a controlled Windows environment
-          - Checking for updated build dependencies
-          "@
+            Hadoop $version Windows Native Build Log
+            ========================================
+            
+            Build Environment:
+            - OS: Windows Server (GitHub Actions)
+            - Java: 11 (Temurin)
+            - Visual Studio: 2022
+            - Build Tools: Maven, CMake, MSBuild
+            
+            Native Files Found: $env:NATIVE_FILES_FOUND
+            Files Packaged: $filesPackaged
+            
+            Build Strategies Attempted:
+            1. Maven with native profile on hadoop-common
+            2. Maven with native profile on hadoop-hdfs  
+            3. Direct CMake build in native source directory
+            4. Direct MSBuild on winutils projects
+            5. Comprehensive filesystem search for any built artifacts
+            
+            For complete build logs, refer to the GitHub Actions workflow execution.
+            
+            If this package is missing expected files, the build may have encountered
+            platform-specific issues. Consider:
+            - Using official Hadoop distributions when available
+            - Building in a controlled Windows environment
+            - Checking for updated build dependencies
+            "@
           
           $buildLog | Out-File -FilePath "$outputDir\BUILD_LOG.txt" -Encoding UTF8
           
