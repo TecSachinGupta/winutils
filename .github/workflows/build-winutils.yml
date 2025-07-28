@@ -480,56 +480,56 @@ jobs:
           }
           
           $readme = @"
-        # Hadoop $version Native Binaries for Windows
-        
-        **Build Date:** $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC')  
-        **Build Status:** $buildStatus  
-        **Source:** Apache Hadoop $version (tag: ${{ env.RELEASE_TAG }})  
-        **Files Packaged:** $filesPackaged
-        
-        ## Contents
-        
-        - **lib/native/**: Native libraries (.dll, .lib files)
-        - **bin/**: Essential Windows utilities (winutils.exe, hadoop.exe)
-        - **sbin/**: Additional system utilities
-        
-        ## Installation
-        
-        1. Extract this archive to your desired location
-        2. Set environment variable: `HADOOP_HOME=<path-to-extracted-folder>`
-        3. Add to PATH: `%HADOOP_HOME%\bin`
-        4. Verify installation: `winutils.exe` (should show usage info)
-        
-        ## Build Information
-        
-        This package was built using multiple strategies:
-        1. Maven native profile compilation
-        2. Direct CMake builds for native components  
-        3. MSBuild for Windows-specific utilities
-        4. Comprehensive file system search for all artifacts
-        
-        Build Results:
-        - Common Native: $env:COMMON_SUCCESS
-        - HDFS Native: $env:HDFS_SUCCESS  
-        - CMake Build: $env:CMAKE_SUCCESS
-        - Winutils Build: $env:WINUTILS_SUCCESS
-        
-        Some components may be missing if specific build strategies failed.
-        Check BUILD_LOG.txt for detailed information.
-        
-        ## Troubleshooting
-        
-        If you encounter issues:
-        - Ensure Visual C++ Redistributable is installed
-        - Check that all .dll files are in lib/native/
-        - Verify winutils.exe has execution permissions
-        - See GitHub Actions logs for build details
-        
-        ## Notes
-        
-        These binaries are built from official Apache Hadoop source code.
-        For production use, consider building from source in your target environment.
-        "@
+          # Hadoop $version Native Binaries for Windows
+          
+          **Build Date:** $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC')  
+          **Build Status:** $buildStatus  
+          **Source:** Apache Hadoop $version (tag: ${{ env.RELEASE_TAG }})  
+          **Files Packaged:** $filesPackaged
+          
+          ## Contents
+          
+          - **lib/native/**: Native libraries (.dll, .lib files)
+          - **bin/**: Essential Windows utilities (winutils.exe, hadoop.exe)
+          - **sbin/**: Additional system utilities
+          
+          ## Installation
+          
+          1. Extract this archive to your desired location
+          2. Set environment variable: `HADOOP_HOME=<path-to-extracted-folder>`
+          3. Add to PATH: `%HADOOP_HOME%\bin`
+          4. Verify installation: `winutils.exe` (should show usage info)
+          
+          ## Build Information
+          
+          This package was built using multiple strategies:
+          1. Maven native profile compilation
+          2. Direct CMake builds for native components  
+          3. MSBuild for Windows-specific utilities
+          4. Comprehensive file system search for all artifacts
+          
+          Build Results:
+          - Common Native: $env:COMMON_SUCCESS
+          - HDFS Native: $env:HDFS_SUCCESS  
+          - CMake Build: $env:CMAKE_SUCCESS
+          - Winutils Build: $env:WINUTILS_SUCCESS
+          
+          Some components may be missing if specific build strategies failed.
+          Check BUILD_LOG.txt for detailed information.
+          
+          ## Troubleshooting
+          
+          If you encounter issues:
+          - Ensure Visual C++ Redistributable is installed
+          - Check that all .dll files are in lib/native/
+          - Verify winutils.exe has execution permissions
+          - See GitHub Actions logs for build details
+          
+          ## Notes
+          
+          These binaries are built from official Apache Hadoop source code.
+          For production use, consider building from source in your target environment.
+          "@
           
           $readme | Out-File -FilePath "$outputDir\README.md" -Encoding UTF8
           
