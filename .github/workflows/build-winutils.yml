@@ -1,4 +1,4 @@
-name: Build Hadoop Native Binaries for Windows
+name: Build Hadoop Windows Binaries
 
 on:
   pull_request:
@@ -53,11 +53,11 @@ jobs:
           echo "RELEASE_TAG=rel/release-${{ matrix.version }}" >> $env:GITHUB_ENV
           echo "DIST_VERSION=hadoop-${{ matrix.version }}" >> $env:GITHUB_ENV
 
-      - name: Set up Java 11 (Temurin)
+      - name: Set up Java 8 (Temurin)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 11
+          java-version: 8
 
       - name: Install Python 3
         uses: actions/setup-python@v5
@@ -70,8 +70,24 @@ jobs:
       - name: Install Native Build Dependencies
         shell: powershell
         run: |
-          choco install -y maven git winflexbison3 cmake protoc ninja nasm openssl zlib
+          # Install required build tools based on Hadoop BUILDING.txt requirements
+          choco install -y maven git cmake protoc openssl zlib vcpkg
+          choco install -y winflexbison3 nasm ninja
+          
+          # Configure git for long paths
           git config --system core.longpaths true
+          
+          # Install Protocol Buffers 3.21.12 (current requirement)
+          Write-Host "Installing Protocol Buffers..."
+          
+          # Install Boost via vcpkg (required for native code)
+          Write-Host "Setting up vcpkg for Boost..."
+          vcpkg integrate install
+          vcpkg install boost:x64-windows
+          
+          # Set environment variables for build tools
+          $env:VCPKG_ROOT = "C:\vcpkg"
+          "VCPKG_ROOT=$env:VCPKG_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Checkout Hadoop Source Code
         uses: actions/checkout@v4
@@ -131,65 +147,105 @@ jobs:
       - name: Setup Build Environment
         shell: powershell
         run: |
-          # Set up build environment variables
-          $env:JAVA_HOME = $env:JAVA_HOME_11_X64
+          # Set up build environment variables based on Hadoop BUILDING.txt
+          $env:JAVA_HOME = $env:JAVA_HOME_8_X64
           $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
-          $env:MAVEN_OPTS = "-Xmx2048m -Xms512m -XX:MetaspaceSize=256m -XX:MaxMetaspaceSize=512m"
+          
+          # Set Maven options with more memory for Windows builds
+          $env:MAVEN_OPTS = "-Xmx4096m -Xms1024m -XX:MetaspaceSize=512m -XX:MaxMetaspaceSize=1024m"
+          
+          # Set platform-specific variables for Windows native builds
+          $env:PLATFORM = "x64"
+          $env:CMAKE_GENERATOR = "Visual Studio 17 2022"
+          
+          # Protocol Buffers and native library paths
+          $env:PROTOBUF_HOME = "C:\ProgramData\chocolatey\lib\protoc\tools"
+          $env:OPENSSL_ROOT_DIR = "C:\Program Files\OpenSSL-Win64"
           
           # Save environment for subsequent steps
           "JAVA_HOME=$env:JAVA_HOME" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "MAVEN_OPTS=$env:MAVEN_OPTS" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "PLATFORM=$env:PLATFORM" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CMAKE_GENERATOR=$env:CMAKE_GENERATOR" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "PROTOBUF_HOME=$env:PROTOBUF_HOME" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "OPENSSL_ROOT_DIR=$env:OPENSSL_ROOT_DIR" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           
           Write-Host "Build environment configured:"
           Write-Host "JAVA_HOME: $env:JAVA_HOME"
           Write-Host "MAVEN_OPTS: $env:MAVEN_OPTS"
+          Write-Host "PLATFORM: $env:PLATFORM"
+          Write-Host "CMAKE_GENERATOR: $env:CMAKE_GENERATOR"
 
-      - name: Build Strategy 1 - Maven Native Common
+      - name: Build Strategy 1 - Full Native Maven Build
         shell: powershell
         run: |
           Set-Location hadoop
-          Write-Host "=== Building hadoop-common with native profile ==="
+          Write-Host "=== Building Hadoop with native libraries (official method) ==="
           
           $buildScript = @'
           call "$env:VCVARS_PATH"
-          mvn compile -pl hadoop-common-project/hadoop-common -Pnative -DskipTests -Dmaven.javadoc.skip=true -Dtar -q
+          set JAVA_HOME=%JAVA_HOME%
+          set MAVEN_OPTS=%MAVEN_OPTS%
+          set PLATFORM=%PLATFORM%
+          mvn clean package -Pnative -Pdist -DskipTests -Dtar -Dmaven.javadoc.skip=true
           '@
           
-          $buildScript | Out-File -FilePath "build_common.bat" -Encoding ascii
+          $buildScript | Out-File -FilePath "build_native_full.bat" -Encoding ascii
           
-          $result = cmd.exe /c "build_common.bat" 2>&1
+          $result = cmd.exe /c "build_native_full.bat" 2>&1
           Write-Host "Build output: $result"
           
           if ($LASTEXITCODE -eq 0) {
-            Write-Host "✓ Hadoop-common native build succeeded"
-            "COMMON_SUCCESS=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            Write-Host "✓ Full native Maven build succeeded"
+            "FULL_NATIVE_SUCCESS=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           } else {
-            Write-Host "✗ Hadoop-common native build failed"
-            "COMMON_SUCCESS=false" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            Write-Host "✗ Full native Maven build failed"
+            "FULL_NATIVE_SUCCESS=false" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           }
 
-      - name: Build Strategy 2 - Maven Native HDFS
+      - name: Build Strategy 2 - Individual Module Builds
         shell: powershell
         run: |
           Set-Location hadoop
-          Write-Host "=== Building hadoop-hdfs with native profile ==="
+          Write-Host "=== Building individual modules with native support ==="
           
-          $buildScript = @'
-          call "$env:VCVARS_PATH"
-          mvn compile -pl hadoop-hdfs-project/hadoop-hdfs -Pnative -DskipTests -Dmaven.javadoc.skip=true -q
-          '@
+          $modules = @(
+            "hadoop-common-project/hadoop-common",
+            "hadoop-hdfs-project/hadoop-hdfs",
+            "hadoop-mapreduce-project/hadoop-mapreduce-client/hadoop-mapreduce-client-nativetask"
+          )
           
-          $buildScript | Out-File -FilePath "build_hdfs.bat" -Encoding ascii
+          $moduleSuccess = $false
           
-          $result = cmd.exe /c "build_hdfs.bat" 2>&1
-          Write-Host "Build output: $result"
+          foreach ($module in $modules) {
+            if (Test-Path $module) {
+              Write-Host "Building module: $module"
+              
+              $buildScript = @"
+              call "$env:VCVARS_PATH"
+              set JAVA_HOME=$env:JAVA_HOME
+              set MAVEN_OPTS=$env:MAVEN_OPTS
+              mvn compile -pl $module -Pnative -DskipTests -Dmaven.javadoc.skip=true -q
+              "@
+              
+              $buildScript | Out-File -FilePath "build_module.bat" -Encoding ascii
+              
+              $result = cmd.exe /c "build_module.bat" 2>&1
+              Write-Host "Module build output: $result"
+              
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "✓ Module $module built successfully"
+                $moduleSuccess = $true
+              } else {
+                Write-Host "✗ Module $module build failed"
+              }
+            }
+          }
           
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "✓ Hadoop-hdfs native build succeeded"
-            "HDFS_SUCCESS=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if ($moduleSuccess) {
+            "MODULE_SUCCESS=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           } else {
-            Write-Host "✗ Hadoop-hdfs native build failed"
-            "HDFS_SUCCESS=false" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            "MODULE_SUCCESS=false" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           }
 
       - name: Build Strategy 3 - Direct CMake
@@ -210,7 +266,7 @@ jobs:
             call "$env:VCVARS_PATH"
             cmake . -B build -G "Visual Studio 17 2022" -A x64 -DJVM_ARCH_DATA_MODEL=64 -DREQUIRE_LIBWEBHDFS=OFF -DREQUIRE_SNAPPY=OFF
             cmake --build build --config Release --target hadoop
-          '@
+            '@
             
             $buildScript | Out-File -FilePath "cmake_build.bat" -Encoding ascii
             
