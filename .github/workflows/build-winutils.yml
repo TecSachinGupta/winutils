@@ -126,7 +126,7 @@ jobs:
           }
           
           Write-Host "Found Visual Studio vcvars64.bat at: $vcVarsPath"
-          echo "VCVARS_PATH=$vcVarsPath" >> $env:GITHUB_ENV
+          "VCVARS_PATH=$vcVarsPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Setup Build Environment
         shell: powershell
@@ -137,8 +137,8 @@ jobs:
           $env:MAVEN_OPTS = "-Xmx2048m -Xms512m -XX:MetaspaceSize=256m -XX:MaxMetaspaceSize=512m"
           
           # Save environment for subsequent steps
-          echo "JAVA_HOME=$env:JAVA_HOME" >> $env:GITHUB_ENV
-          echo "MAVEN_OPTS=$env:MAVEN_OPTS" >> $env:GITHUB_ENV
+          "JAVA_HOME=$env:JAVA_HOME" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "MAVEN_OPTS=$env:MAVEN_OPTS" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           
           Write-Host "Build environment configured:"
           Write-Host "JAVA_HOME: $env:JAVA_HOME"
@@ -150,10 +150,10 @@ jobs:
           Set-Location hadoop
           Write-Host "=== Building hadoop-common with native profile ==="
           
-          $buildScript = @"
+          $buildScript = @'
           call "$env:VCVARS_PATH"
           mvn compile -pl hadoop-common-project/hadoop-common -Pnative -DskipTests -Dmaven.javadoc.skip=true -Dtar -q
-          "@
+          '@
           
           $buildScript | Out-File -FilePath "build_common.bat" -Encoding ascii
           
@@ -162,10 +162,10 @@ jobs:
           
           if ($LASTEXITCODE -eq 0) {
             Write-Host "✓ Hadoop-common native build succeeded"
-            echo "COMMON_SUCCESS=true" >> $env:GITHUB_ENV
+            "COMMON_SUCCESS=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           } else {
             Write-Host "✗ Hadoop-common native build failed"
-            echo "COMMON_SUCCESS=false" >> $env:GITHUB_ENV
+            "COMMON_SUCCESS=false" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           }
 
       - name: Build Strategy 2 - Maven Native HDFS
@@ -174,10 +174,10 @@ jobs:
           Set-Location hadoop
           Write-Host "=== Building hadoop-hdfs with native profile ==="
           
-          $buildScript = @"
+          $buildScript = @'
           call "$env:VCVARS_PATH"
           mvn compile -pl hadoop-hdfs-project/hadoop-hdfs -Pnative -DskipTests -Dmaven.javadoc.skip=true -q
-          "@
+          '@
           
           $buildScript | Out-File -FilePath "build_hdfs.bat" -Encoding ascii
           
@@ -186,10 +186,10 @@ jobs:
           
           if ($LASTEXITCODE -eq 0) {
             Write-Host "✓ Hadoop-hdfs native build succeeded"
-            echo "HDFS_SUCCESS=true" >> $env:GITHUB_ENV
+            "HDFS_SUCCESS=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           } else {
             Write-Host "✗ Hadoop-hdfs native build failed"
-            echo "HDFS_SUCCESS=false" >> $env:GITHUB_ENV
+            "HDFS_SUCCESS=false" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           }
 
       - name: Build Strategy 3 - Direct CMake
@@ -206,11 +206,11 @@ jobs:
               Remove-Item -Recurse -Force "build" -ErrorAction SilentlyContinue
             }
             
-            $buildScript = @"
+            $buildScript = @'
             call "$env:VCVARS_PATH"
             cmake . -B build -G "Visual Studio 17 2022" -A x64 -DJVM_ARCH_DATA_MODEL=64 -DREQUIRE_LIBWEBHDFS=OFF -DREQUIRE_SNAPPY=OFF
             cmake --build build --config Release --target hadoop
-            "@
+          '@
             
             $buildScript | Out-File -FilePath "cmake_build.bat" -Encoding ascii
             
@@ -221,14 +221,14 @@ jobs:
             
             if ($LASTEXITCODE -eq 0) {
               Write-Host "✓ CMake build succeeded"
-              echo "CMAKE_SUCCESS=true" >> $env:GITHUB_ENV
+              "CMAKE_SUCCESS=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             } else {
               Write-Host "✗ CMake build failed"
-              echo "CMAKE_SUCCESS=false" >> $env:GITHUB_ENV
+              "CMAKE_SUCCESS=false" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             }
           } else {
             Write-Host "✗ Native directory not found"
-            echo "CMAKE_SUCCESS=false" >> $env:GITHUB_ENV
+            "CMAKE_SUCCESS=false" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           }
 
       - name: Build Strategy 4 - MSBuild Winutils
@@ -250,10 +250,10 @@ jobs:
               foreach ($sln in $slnFiles) {
                 Write-Host "Building solution: $($sln.Name)"
                 
-                $buildScript = @"
+                $buildScript = @'
                 call "$env:VCVARS_PATH"
                 msbuild "$($sln.FullName)" /p:Configuration=Release /p:Platform=x64 /m
-                "@
+                '@
                 
                 $buildScript | Out-File -FilePath "build_sln.bat" -Encoding ascii
                 
@@ -271,10 +271,10 @@ jobs:
               foreach ($proj in $vcxprojFiles) {
                 Write-Host "Building project: $($proj.Name)"
                 
-                $buildScript = @"
+                $buildScript = @'
                 call "$env:VCVARS_PATH"
                 msbuild "$($proj.FullName)" /p:Configuration=Release /p:Platform=x64
-                "@
+                '@
                 
                 $buildScript | Out-File -FilePath "build_proj.bat" -Encoding ascii
                 
@@ -295,13 +295,13 @@ jobs:
             Set-Location $env:GITHUB_WORKSPACE
             
             if ($winutilsSuccess) {
-              echo "WINUTILS_SUCCESS=true" >> $env:GITHUB_ENV
+              "WINUTILS_SUCCESS=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             } else {
-              echo "WINUTILS_SUCCESS=false" >> $env:GITHUB_ENV
+              "WINUTILS_SUCCESS=false" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             }
           } else {
             Write-Host "✗ Winutils directory not found"
-            echo "WINUTILS_SUCCESS=false" >> $env:GITHUB_ENV
+            "WINUTILS_SUCCESS=false" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           }
 
       - name: Build Summary
@@ -317,10 +317,10 @@ jobs:
           
           if ($anySuccess) {
             Write-Host "✓ At least one build strategy succeeded"
-            echo "BUILD_SUCCESS=true" >> $env:GITHUB_ENV
+            "BUILD_SUCCESS=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           } else {
             Write-Host "✗ All build strategies failed"
-            echo "BUILD_SUCCESS=false" >> $env:GITHUB_ENV
+            "BUILD_SUCCESS=false" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           }
 
       - name: Comprehensive Native Library Search
@@ -402,7 +402,7 @@ jobs:
           
           # Export results for next step
           $foundCount = $uniqueFiles.Count
-          echo "NATIVE_FILES_FOUND=$foundCount" >> $env:GITHUB_ENV
+          "NATIVE_FILES_FOUND=$foundCount" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           
           Write-Host "=== Search Summary ==="
           Write-Host "Total unique native files found: $foundCount"
