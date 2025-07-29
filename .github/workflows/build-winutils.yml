@@ -71,7 +71,7 @@ jobs:
         shell: powershell
         run: |
           # Install required build tools based on Hadoop BUILDING.txt requirements
-          choco install -y maven git cmake protoc openssl zlib vcpkg
+          choco install -y maven git cmake protoc openssl zlib
           choco install -y winflexbison3 nasm ninja
           
           # Configure git for long paths
@@ -80,14 +80,39 @@ jobs:
           # Install Protocol Buffers 3.21.12 (current requirement)
           Write-Host "Installing Protocol Buffers..."
           
-          # Install Boost via vcpkg (required for native code)
-          Write-Host "Setting up vcpkg for Boost..."
-          vcpkg integrate install
-          vcpkg install boost:x64-windows
+          # Alternative: Install vcpkg without boost (Boost causes rate limiting issues)
+          Write-Host "Setting up vcpkg without automatic boost installation..."
+          choco install -y vcpkg
           
           # Set environment variables for build tools
           $env:VCPKG_ROOT = "C:\vcpkg"
           "VCPKG_ROOT=$env:VCPKG_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install Boost Manually (Alternative to vcpkg)
+        shell: powershell
+        run: |
+          Write-Host "Installing Boost from pre-built binaries..."
+          
+          # Download and install pre-built Boost (avoids GitHub rate limiting)
+          $boostVersion = "1.82.0"
+          $boostUrl = "https://sourceforge.net/projects/boost/files/boost-binaries/$boostVersion/boost_1_82_0-msvc-14.3-64.exe/download"
+          $boostInstaller = "boost_installer.exe"
+          
+          try {
+            Invoke-WebRequest -Uri $boostUrl -OutFile $boostInstaller -TimeoutSec 300
+            Start-Process -FilePath $boostInstaller -ArgumentList "/SILENT", "/DIR=C:\boost" -Wait -NoNewWindow
+            
+            # Set Boost environment variables
+            $env:BOOST_ROOT = "C:\boost"
+            $env:BOOST_LIBRARYDIR = "C:\boost\lib64-msvc-14.3"
+            "BOOST_ROOT=$env:BOOST_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            "BOOST_LIBRARYDIR=$env:BOOST_LIBRARYDIR" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            
+            Write-Host "✓ Boost installed successfully"
+          } catch {
+            Write-Host "⚠ Boost installation failed, continuing without Boost"
+            Write-Host "Error: $($_.Exception.Message)"
+          }
 
       - name: Checkout Hadoop Source Code
         uses: actions/checkout@v4
@@ -187,7 +212,7 @@ jobs:
           set JAVA_HOME=%JAVA_HOME%
           set MAVEN_OPTS=%MAVEN_OPTS%
           set PLATFORM=%PLATFORM%
-          mvn clean package -Pnative -Pdist -DskipTests -Dtar -Dmaven.javadoc.skip=true
+          mvn clean package -Pnative-win -Pdist -DskipTests -Dtar -Dmaven.javadoc.skip=true -Drequire.snappy=false -Drequire.openssl=false
           '@
           
           $buildScript | Out-File -FilePath "build_native_full.bat" -Encoding ascii
@@ -211,8 +236,7 @@ jobs:
           
           $modules = @(
             "hadoop-common-project/hadoop-common",
-            "hadoop-hdfs-project/hadoop-hdfs",
-            "hadoop-mapreduce-project/hadoop-mapreduce-client/hadoop-mapreduce-client-nativetask"
+            "hadoop-hdfs-project/hadoop-hdfs"
           )
           
           $moduleSuccess = $false
@@ -225,7 +249,7 @@ jobs:
               call "%VCVARS_PATH%"
               set JAVA_HOME=%JAVA_HOME%
               set MAVEN_OPTS=%MAVEN_OPTS%
-              mvn compile -pl $module -Pnative -DskipTests -Dmaven.javadoc.skip=true -q
+              mvn compile -pl $module -Pnative-win -DskipTests -Dmaven.javadoc.skip=true -Drequire.snappy=false -Drequire.openssl=false -q
               "@
               
               $buildScript | Out-File -FilePath "build_module.bat" -Encoding ascii
@@ -265,7 +289,7 @@ jobs:
             $buildScript = @"
             call "%VCVARS_PATH%"
             set JAVA_HOME=%JAVA_HOME%
-            cmake . -B build -G "%CMAKE_GENERATOR%" -A %PLATFORM% -DJVM_ARCH_DATA_MODEL=64 -DREQUIRE_LIBWEBHDFS=OFF -DREQUIRE_SNAPPY=OFF -DREQUIRE_OPENSSL=ON -DOPENSSL_ROOT_DIR="%OPENSSL_ROOT_DIR%" -DProtobuf_ROOT="%PROTOBUF_HOME%"
+            cmake . -B build -G "%CMAKE_GENERATOR%" -A %PLATFORM% -DJVM_ARCH_DATA_MODEL=64 -DREQUIRE_LIBWEBHDFS=OFF -DREQUIRE_SNAPPY=OFF -DREQUIRE_OPENSSL=OFF -DREQUIRE_ZSTD=OFF
             cmake --build build --config Release --parallel
             "@
             
@@ -560,7 +584,7 @@ jobs:
           ## Build Information
           
           This package was built using multiple strategies:
-          1. Full native Maven build with -Pnative -Pdist profiles
+          1. Full native Maven build with -Pnative-win -Pdist profiles
           2. Individual module builds with native profiles  
           3. Direct CMake builds for native components
           4. MSBuild for Windows-specific utilities
@@ -606,7 +630,7 @@ jobs:
           Files Packaged: $filesPackaged
           
           Build Strategies Attempted:
-          1. Full native Maven build with -Pnative -Pdist: $env:FULL_NATIVE_SUCCESS
+          1. Full native Maven build with -Pnative-win -Pdist: $env:FULL_NATIVE_SUCCESS
           2. Individual module builds with native profiles: $env:MODULE_SUCCESS
           3. Direct CMake build in native source directory: $env:CMAKE_SUCCESS
           4. Direct MSBuild on winutils projects: $env:WINUTILS_SUCCESS
