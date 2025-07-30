@@ -231,11 +231,9 @@ jobs:
           Set-Location hadoop
           Write-Host "Building Java components with minimal dependencies..."
           
-          $buildScript = @'
-          set JAVA_HOME=%JAVA_HOME%
-          set MAVEN_OPTS=%MAVEN_OPTS%
-          mvn clean compile -DskipTests -Dmaven.javadoc.skip=true -Drequire.snappy=false -Drequire.openssl=false -Drequire.zstd=false -Drequire.boost=false
-          '@
+          $buildScript = 'set JAVA_HOME=%JAVA_HOME%' + "`n" +
+                        'set MAVEN_OPTS=%MAVEN_OPTS%' + "`n" +
+                        'mvn clean compile -DskipTests -Dmaven.javadoc.skip=true -Drequire.snappy=false -Drequire.openssl=false -Drequire.zstd=false -Drequire.boost=false -Dcompile.native=false'
           
           $buildScript | Out-File -FilePath "build_minimal.bat" -Encoding ascii
           
@@ -249,30 +247,28 @@ jobs:
             "MINIMAL_SUCCESS=false" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           }
 
-      - name: Build Strategy 2 - Native Components Only
+      - name: Build Strategy 2 - Skip Native Compilation
         shell: powershell
         run: |
           Set-Location hadoop
-          Write-Host "Building native components only (skip dist module)..."
+          Write-Host "Building Java components only (skip native compilation)..."
           
-          $buildScript = @'
-          call "%VCVARS_PATH%"
-          set JAVA_HOME=%JAVA_HOME%
-          set MAVEN_OPTS=%MAVEN_OPTS%
-          set PLATFORM=%PLATFORM%
-          mvn clean compile -pl hadoop-common-project/hadoop-common,hadoop-hdfs-project/hadoop-hdfs -Pnative-win -DskipTests -Dmaven.javadoc.skip=true -Drequire.snappy=false -Drequire.openssl=false
-          '@
+          $buildScript = 'call "%VCVARS_PATH%"' + "`n" +
+                        'set JAVA_HOME=%JAVA_HOME%' + "`n" +
+                        'set MAVEN_OPTS=%MAVEN_OPTS%' + "`n" +
+                        'set PLATFORM=%PLATFORM%' + "`n" +
+                        'mvn clean compile -pl hadoop-common-project/hadoop-common,hadoop-hdfs-project/hadoop-hdfs -DskipTests -Dmaven.javadoc.skip=true -Dcompile.native=false -Drequire.snappy=false -Drequire.openssl=false'
           
-          $buildScript | Out-File -FilePath "build_native.bat" -Encoding ascii
+          $buildScript | Out-File -FilePath "build_java_only.bat" -Encoding ascii
           
-          $process = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "build_native.bat" -Wait -PassThru -NoNewWindow
+          $process = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "build_java_only.bat" -Wait -PassThru -NoNewWindow
           
           if ($process.ExitCode -eq 0) {
-            Write-Host "Native build succeeded"
-            "NATIVE_SUCCESS=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            Write-Host "Java-only build succeeded"
+            "JAVA_SUCCESS=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           } else {
-            Write-Host "Native build failed"
-            "NATIVE_SUCCESS=false" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            Write-Host "Java-only build failed"
+            "JAVA_SUCCESS=false" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           }
 
       - name: Build Strategy 3 - Individual Modules
@@ -292,12 +288,10 @@ jobs:
             if (Test-Path $module) {
               Write-Host "Building module: $module"
               
-              $buildScript = @'
-              call "%VCVARS_PATH%"
-              set JAVA_HOME=%JAVA_HOME%
-              set MAVEN_OPTS=%MAVEN_OPTS%
-              mvn compile -pl {0} -Pnative-win -DskipTests -Dmaven.javadoc.skip=true -Drequire.snappy=false -Drequire.openssl=false -q
-              '@ -f $module
+              $buildScript = 'call "%VCVARS_PATH%"' + "`n" +
+                            'set JAVA_HOME=%JAVA_HOME%' + "`n" +
+                            'set MAVEN_OPTS=%MAVEN_OPTS%' + "`n" +
+                            "mvn compile -pl $module -DskipTests -Dmaven.javadoc.skip=true -Dcompile.native=false -Drequire.snappy=false -Drequire.openssl=false -q"
               
               $buildScript | Out-File -FilePath "build_module.bat" -Encoding ascii
               
@@ -331,12 +325,10 @@ jobs:
               Remove-Item -Recurse -Force "build" -ErrorAction SilentlyContinue
             }
             
-            $buildScript = @'
-            call "%VCVARS_PATH%"
-            set JAVA_HOME=%JAVA_HOME%
-            cmake . -B build -G "%CMAKE_GENERATOR%" -A %PLATFORM% -DJVM_ARCH_DATA_MODEL=64 -DREQUIRE_LIBWEBHDFS=OFF -DREQUIRE_SNAPPY=OFF -DREQUIRE_OPENSSL=OFF -DREQUIRE_ZSTD=OFF
-            cmake --build build --config Release --parallel
-            '@
+            $buildScript = 'call "%VCVARS_PATH%"' + "`n" +
+                          'set JAVA_HOME=%JAVA_HOME%' + "`n" +
+                          'cmake . -B build -G "%CMAKE_GENERATOR%" -A %PLATFORM% -DJVM_ARCH_DATA_MODEL=64 -DREQUIRE_LIBWEBHDFS=OFF -DREQUIRE_SNAPPY=OFF -DREQUIRE_OPENSSL=OFF -DREQUIRE_ZSTD=OFF' + "`n" +
+                          'cmake --build build --config Release --parallel'
             
             $buildScript | Out-File -FilePath "cmake_build.bat" -Encoding ascii
             
@@ -374,10 +366,8 @@ jobs:
               foreach ($sln in $slnFiles) {
                 Write-Host "Building solution: $($sln.Name)"
                 
-                $buildScript = @'
-                call "%VCVARS_PATH%"
-                msbuild "{0}" /p:Configuration=Release /p:Platform=x64 /m
-                '@ -f $sln.FullName
+                $buildScript = 'call "%VCVARS_PATH%"' + "`n" +
+                              "msbuild `"$($sln.FullName)`" /p:Configuration=Release /p:Platform=x64 /m"
                 
                 $buildScript | Out-File -FilePath "build_sln.bat" -Encoding ascii
                 
@@ -394,10 +384,8 @@ jobs:
               foreach ($proj in $vcxprojFiles) {
                 Write-Host "Building project: $($proj.Name)"
                 
-                $buildScript = @'
-                call "%VCVARS_PATH%"
-                msbuild "{0}" /p:Configuration=Release /p:Platform=x64
-                '@ -f $proj.FullName
+                $buildScript = 'call "%VCVARS_PATH%"' + "`n" +
+                              "msbuild `"$($proj.FullName)`" /p:Configuration=Release /p:Platform=x64"
                 
                 $buildScript | Out-File -FilePath "build_proj.bat" -Encoding ascii
                 
@@ -426,17 +414,42 @@ jobs:
             "WINUTILS_SUCCESS=false" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           }
 
+      - name: Build Strategy 6 - Force Native Build with Fallbacks
+        shell: powershell
+        run: |
+          Set-Location hadoop
+          Write-Host "Attempting native build with fallback options..."
+          
+          $buildScript = 'call "%VCVARS_PATH%"' + "`n" +
+                        'set JAVA_HOME=%JAVA_HOME%' + "`n" +
+                        'set MAVEN_OPTS=%MAVEN_OPTS%' + "`n" +
+                        'set PLATFORM=%PLATFORM%' + "`n" +
+                        'mvn compile -pl hadoop-common-project/hadoop-common -Pnative-win -DskipTests -Dmaven.javadoc.skip=true -Drequire.snappy=false -Drequire.openssl=false -Drequire.zstd=false -Drequire.boost=false -Dcompile.native=true'
+          
+          $buildScript | Out-File -FilePath "build_force_native.bat" -Encoding ascii
+          
+          $process = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "build_force_native.bat" -Wait -PassThru -NoNewWindow
+          
+          if ($process.ExitCode -eq 0) {
+            Write-Host "Force native build succeeded"
+            "FORCE_NATIVE_SUCCESS=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          } else {
+            Write-Host "Force native build failed"
+            "FORCE_NATIVE_SUCCESS=false" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+
       - name: Build Summary
         shell: powershell
         run: |
           Write-Host "=== Build Summary ==="
           Write-Host "Minimal Build: $env:MINIMAL_SUCCESS"
-          Write-Host "Native Build: $env:NATIVE_SUCCESS"
+          Write-Host "Java Build: $env:JAVA_SUCCESS"
           Write-Host "Module Build: $env:MODULE_SUCCESS"  
           Write-Host "CMake Build: $env:CMAKE_SUCCESS"
           Write-Host "Winutils Build: $env:WINUTILS_SUCCESS"
+          Write-Host "Force Native Build: $env:FORCE_NATIVE_SUCCESS"
           
-          $anySuccess = ($env:MINIMAL_SUCCESS -eq "true") -or ($env:NATIVE_SUCCESS -eq "true") -or ($env:MODULE_SUCCESS -eq "true") -or ($env:CMAKE_SUCCESS -eq "true") -or ($env:WINUTILS_SUCCESS -eq "true")
+          $anySuccess = ($env:MINIMAL_SUCCESS -eq "true") -or ($env:JAVA_SUCCESS -eq "true") -or ($env:MODULE_SUCCESS -eq "true") -or ($env:CMAKE_SUCCESS -eq "true") -or ($env:WINUTILS_SUCCESS -eq "true") -or ($env:FORCE_NATIVE_SUCCESS -eq "true")
           
           if ($anySuccess) {
             Write-Host "At least one build strategy succeeded"
@@ -590,91 +603,95 @@ jobs:
             "BUILD FAILED - No native files found" 
           }
           
+          $currentDate = Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC'
           $readme = @"
-          # Hadoop $version Native Binaries for Windows
-          
-          **Build Date:** $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC')  
-          **Build Status:** $buildStatus  
-          **Source:** Apache Hadoop $version (tag: ${{ env.RELEASE_TAG }})  
-          **Files Packaged:** $filesPackaged
-          
-          ## Contents
-          
-          - **lib/native/**: Native libraries (.dll, .lib files)
-          - **bin/**: Essential Windows utilities (winutils.exe, hadoop.exe)
-          - **sbin/**: Additional system utilities
-          
-          ## Installation
-          
-          1. Extract this archive to your desired location
-          2. Set environment variable: HADOOP_HOME=<path-to-extracted-folder>
-          3. Add to PATH: %HADOOP_HOME%\bin
-          4. Verify installation: winutils.exe (should show usage info)
-          
-          ## Build Information
-          
-          This package was built using multiple strategies:
-          1. Minimal Java build without external dependencies
-          2. Native component build with -Pnative-win profile
-          3. Individual module builds with native profiles  
-          4. Direct CMake builds for native components
-          5. MSBuild for Windows-specific utilities
-          6. Comprehensive file system search for all artifacts
-          
-          Build Results:
-          - Minimal Build: $env:MINIMAL_SUCCESS
-          - Native Build: $env:NATIVE_SUCCESS
-          - Module Build: $env:MODULE_SUCCESS  
-          - CMake Build: $env:CMAKE_SUCCESS
-          - Winutils Build: $env:WINUTILS_SUCCESS
-          
-          Some components may be missing if specific build strategies failed.
-          Check BUILD_LOG.txt for detailed information.
-          
-          ## Troubleshooting
-          
-          If you encounter issues:
-          - Ensure Visual C++ Redistributable is installed
-          - Check that all .dll files are in lib/native/
-          - Verify winutils.exe has execution permissions
-          - See GitHub Actions logs for build details
-          
-          ## Notes
-          
-          These binaries are built from official Apache Hadoop source code.
-          For production use, consider building from source in your target environment.
-          "@
+			# Hadoop $version Native Binaries for Windows
+			
+			**Build Date:** $currentDate  
+			**Build Status:** $buildStatus  
+			**Source:** Apache Hadoop $version (tag: ${{ env.RELEASE_TAG }})  
+			**Files Packaged:** $filesPackaged
+			
+			## Contents
+			
+			- **lib/native/**: Native libraries (.dll, .lib files)
+			- **bin/**: Essential Windows utilities (winutils.exe, hadoop.exe)
+			- **sbin/**: Additional system utilities
+			
+			## Installation
+			
+			1. Extract this archive to your desired location
+			2. Set environment variable: HADOOP_HOME=<path-to-extracted-folder>
+			3. Add to PATH: %HADOOP_HOME%\bin
+			4. Verify installation: winutils.exe (should show usage info)
+			
+			## Build Information
+			
+			This package was built using multiple strategies:
+			1. Minimal Java build without external dependencies
+			2. Java-only build skipping native compilation
+			3. Individual module builds with native profiles  
+			4. Direct CMake builds for native components
+			5. MSBuild for Windows-specific utilities
+			6. Force native build with fallback options
+			7. Comprehensive file system search for all artifacts
+			
+			Build Results:
+			- Minimal Build: $env:MINIMAL_SUCCESS
+			- Java Build: $env:JAVA_SUCCESS
+			- Module Build: $env:MODULE_SUCCESS  
+			- CMake Build: $env:CMAKE_SUCCESS
+			- Winutils Build: $env:WINUTILS_SUCCESS
+			- Force Native Build: $env:FORCE_NATIVE_SUCCESS
+			
+			Some components may be missing if specific build strategies failed.
+			Check BUILD_LOG.txt for detailed information.
+			
+			## Troubleshooting
+			
+			If you encounter issues:
+			- Ensure Visual C++ Redistributable is installed
+			- Check that all .dll files are in lib/native/
+			- Verify winutils.exe has execution permissions
+			- See GitHub Actions logs for build details
+			
+			## Notes
+			
+			These binaries are built from official Apache Hadoop source code.
+			For production use, consider building from source in your target environment.
+			"@
           
           $readme | Out-File -FilePath "$outputDir\README.md" -Encoding UTF8
           
           $buildLog = @"
-          Hadoop $version Windows Native Build Log
-          ========================================
-          
-          Build Environment:
-          - OS: Windows Server (GitHub Actions)
-          - Java: 8 (Temurin)
-          - Visual Studio: 2022
-          - Build Tools: Maven, CMake, MSBuild
-          
-          Native Files Found: $env:NATIVE_FILES_FOUND
-          Files Packaged: $filesPackaged
-          
-          Build Strategies Attempted:
-          1. Minimal build without external dependencies: $env:MINIMAL_SUCCESS
-          2. Native component build with -Pnative-win: $env:NATIVE_SUCCESS
-          3. Individual module builds with native profiles: $env:MODULE_SUCCESS
-          4. Direct CMake build in native source directory: $env:CMAKE_SUCCESS
-          5. Direct MSBuild on winutils projects: $env:WINUTILS_SUCCESS
-          
-          For complete build logs, refer to the GitHub Actions workflow execution.
-          
-          If this package is missing expected files, the build may have encountered
-          platform-specific issues. Consider:
-          - Using official Hadoop distributions when available
-          - Building in a controlled Windows environment
-          - Checking for updated build dependencies
-          "@
+            Hadoop $version Windows Native Build Log
+            ========================================
+            
+            Build Environment:
+            - OS: Windows Server (GitHub Actions)
+            - Java: 8 (Temurin)
+            - Visual Studio: 2022
+            - Build Tools: Maven, CMake, MSBuild
+            
+            Native Files Found: $env:NATIVE_FILES_FOUND
+            Files Packaged: $filesPackaged
+            
+            Build Strategies Attempted:
+            1. Minimal build without external dependencies: $env:MINIMAL_SUCCESS
+            2. Java-only build skipping native compilation: $env:JAVA_SUCCESS
+            3. Individual module builds with native profiles: $env:MODULE_SUCCESS
+            4. Direct CMake build in native source directory: $env:CMAKE_SUCCESS
+            5. Direct MSBuild on winutils projects: $env:WINUTILS_SUCCESS
+            6. Force native build with fallback options: $env:FORCE_NATIVE_SUCCESS
+            
+            For complete build logs, refer to the GitHub Actions workflow execution.
+            
+            If this package is missing expected files, the build may have encountered
+            platform-specific issues. Consider:
+            - Using official Hadoop distributions when available
+            - Building in a controlled Windows environment
+            - Checking for updated build dependencies
+            "@
           
           $buildLog | Out-File -FilePath "$outputDir\BUILD_LOG.txt" -Encoding UTF8
           
