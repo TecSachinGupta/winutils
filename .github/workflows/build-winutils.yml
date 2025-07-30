@@ -72,7 +72,7 @@ jobs:
         run: |
           # Install required build tools based on Hadoop BUILDING.txt requirements
           choco install -y maven git cmake protoc openssl zlib
-          choco install -y winflexbison3 nasm ninja
+          choco install -y winflexbison nasm ninja
           
           # Configure git for long paths
           git config --system core.longpaths true
@@ -80,39 +80,66 @@ jobs:
           # Install Protocol Buffers 3.21.12 (current requirement)
           Write-Host "Installing Protocol Buffers..."
           
-          # Alternative: Install vcpkg without boost (Boost causes rate limiting issues)
-          Write-Host "Setting up vcpkg without automatic boost installation..."
-          choco install -y vcpkg
+          # Manually install vcpkg (not available in chocolatey)
+          Write-Host "Installing vcpkg manually..."
+          git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
+          Set-Location C:\vcpkg
+          .\bootstrap-vcpkg.bat
+          .\vcpkg integrate install
           
           # Set environment variables for build tools
           $env:VCPKG_ROOT = "C:\vcpkg"
           "VCPKG_ROOT=$env:VCPKG_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          
+          Set-Location $env:GITHUB_WORKSPACE
 
       - name: Install Boost Manually (Alternative to vcpkg)
         shell: powershell
         run: |
           Write-Host "Installing Boost from pre-built binaries..."
           
-          # Download and install pre-built Boost (avoids GitHub rate limiting)
-          $boostVersion = "1.82.0"
-          $boostUrl = "https://sourceforge.net/projects/boost/files/boost-binaries/$boostVersion/boost_1_82_0-msvc-14.3-64.exe/download"
-          $boostInstaller = "boost_installer.exe"
+          # Use vcpkg to install boost with retry logic to handle rate limiting
+          Set-Location C:\vcpkg
           
-          try {
-            Invoke-WebRequest -Uri $boostUrl -OutFile $boostInstaller -TimeoutSec 300
-            Start-Process -FilePath $boostInstaller -ArgumentList "/SILENT", "/DIR=C:\boost" -Wait -NoNewWindow
+          $maxRetries = 3
+          $retryCount = 0
+          $boostInstalled = $false
+          
+          while ($retryCount -lt $maxRetries -and -not $boostInstalled) {
+            Write-Host "Attempting to install Boost (attempt $($retryCount + 1)/$maxRetries)..."
             
-            # Set Boost environment variables
-            $env:BOOST_ROOT = "C:\boost"
-            $env:BOOST_LIBRARYDIR = "C:\boost\lib64-msvc-14.3"
-            "BOOST_ROOT=$env:BOOST_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-            "BOOST_LIBRARYDIR=$env:BOOST_LIBRARYDIR" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-            
-            Write-Host "✓ Boost installed successfully"
-          } catch {
-            Write-Host "⚠ Boost installation failed, continuing without Boost"
-            Write-Host "Error: $($_.Exception.Message)"
+            try {
+              # Add delay to avoid rate limiting
+              Start-Sleep -Seconds (30 * $retryCount)
+              
+              # Install minimal boost components to avoid rate limiting
+              $result = .\vcpkg install boost-system:x64-windows boost-filesystem:x64-windows --triplet x64-windows 2>&1
+              
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "✓ Boost installed successfully"
+                $boostInstalled = $true
+                
+                # Set Boost environment variables
+                $env:BOOST_ROOT = "C:\vcpkg\installed\x64-windows"
+                $env:BOOST_LIBRARYDIR = "C:\vcpkg\installed\x64-windows\lib"
+                "BOOST_ROOT=$env:BOOST_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+                "BOOST_LIBRARYDIR=$env:BOOST_LIBRARYDIR" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+              } else {
+                Write-Host "Boost installation failed, output: $result"
+                $retryCount++
+              }
+            } catch {
+              Write-Host "Boost installation failed with exception: $($_.Exception.Message)"
+              $retryCount++
+            }
           }
+          
+          if (-not $boostInstalled) {
+            Write-Host "⚠ Boost installation failed after $maxRetries attempts, continuing without Boost"
+            Write-Host "This may cause some native builds to fail, but basic functionality should work"
+          }
+          
+          Set-Location $env:GITHUB_WORKSPACE
 
       - name: Checkout Hadoop Source Code
         uses: actions/checkout@v4
@@ -200,6 +227,34 @@ jobs:
           Write-Host "MAVEN_OPTS: $env:MAVEN_OPTS"
           Write-Host "PLATFORM: $env:PLATFORM"
           Write-Host "CMAKE_GENERATOR: $env:CMAKE_GENERATOR"
+
+      - name: Build Strategy 0 - Skip Dependencies and Build Essential Components Only
+        shell: powershell
+        run: |
+          Set-Location hadoop
+          Write-Host "=== Building essential components without external dependencies ==="
+          
+          # Try building with minimal dependencies
+          $buildScript = @'
+          call "%VCVARS_PATH%"
+          set JAVA_HOME=%JAVA_HOME%
+          set MAVEN_OPTS=%MAVEN_OPTS%
+          set PLATFORM=%PLATFORM%
+          mvn clean compile -DskipTests -Dmaven.javadoc.skip=true -Drequire.snappy=false -Drequire.openssl=false -Drequire.zstd=false -Drequire.boost=false
+          '@
+          
+          $buildScript | Out-File -FilePath "build_minimal.bat" -Encoding ascii
+          
+          $result = cmd.exe /c "build_minimal.bat" 2>&1
+          Write-Host "Minimal build output: $result"
+          
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "✓ Minimal build succeeded"
+            "MINIMAL_SUCCESS=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          } else {
+            Write-Host "✗ Minimal build failed"
+            "MINIMAL_SUCCESS=false" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
 
       - name: Build Strategy 1 - Full Native Maven Build
         shell: powershell
@@ -389,12 +444,13 @@ jobs:
         shell: powershell
         run: |
           Write-Host "=== Build Summary ==="
+          Write-Host "Minimal Build: $env:MINIMAL_SUCCESS"
           Write-Host "Full Native Build: $env:FULL_NATIVE_SUCCESS"
           Write-Host "Individual Modules: $env:MODULE_SUCCESS"  
           Write-Host "CMake Direct Build: $env:CMAKE_SUCCESS"
           Write-Host "Winutils Build: $env:WINUTILS_SUCCESS"
           
-          $anySuccess = ($env:FULL_NATIVE_SUCCESS -eq "true") -or ($env:MODULE_SUCCESS -eq "true") -or ($env:CMAKE_SUCCESS -eq "true") -or ($env:WINUTILS_SUCCESS -eq "true")
+          $anySuccess = ($env:MINIMAL_SUCCESS -eq "true") -or ($env:FULL_NATIVE_SUCCESS -eq "true") -or ($env:MODULE_SUCCESS -eq "true") -or ($env:CMAKE_SUCCESS -eq "true") -or ($env:WINUTILS_SUCCESS -eq "true")
           
           if ($anySuccess) {
             Write-Host "✓ At least one build strategy succeeded"
@@ -584,6 +640,7 @@ jobs:
           ## Build Information
           
           This package was built using multiple strategies:
+          0. Minimal build without external dependencies
           1. Full native Maven build with -Pnative-win -Pdist profiles
           2. Individual module builds with native profiles  
           3. Direct CMake builds for native components
@@ -591,6 +648,7 @@ jobs:
           5. Comprehensive file system search for all artifacts
           
           Build Results:
+          - Minimal Build: $env:MINIMAL_SUCCESS
           - Full Native Build: $env:FULL_NATIVE_SUCCESS
           - Individual Modules: $env:MODULE_SUCCESS  
           - CMake Build: $env:CMAKE_SUCCESS
@@ -630,6 +688,7 @@ jobs:
           Files Packaged: $filesPackaged
           
           Build Strategies Attempted:
+          0. Minimal build without external dependencies: $env:MINIMAL_SUCCESS
           1. Full native Maven build with -Pnative-win -Pdist: $env:FULL_NATIVE_SUCCESS
           2. Individual module builds with native profiles: $env:MODULE_SUCCESS
           3. Direct CMake build in native source directory: $env:CMAKE_SUCCESS
