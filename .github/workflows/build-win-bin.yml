@@ -1,13 +1,40 @@
-name: Build Hadoop on Windows
+name: Build Hadoop on Windows (Artifacts Repository)
 
 on:
   push:
-    branches: [ main, trunk, branch-* ]
+    branches: [ main, master ]
   pull_request:
-    branches: [ main, trunk, branch-* ]
+    branches: [ main, master ]
   workflow_dispatch:
-
+    inputs:
+      hadoop_repo:
+        description: 'Hadoop repository URL'
+        required: false
+        default: 'https://github.com/apache/hadoop.git'
+      hadoop_branch:
+        description: 'Hadoop branch/tag to build'
+        required: false
+        default: 'trunk'
+      build_type:
+        description: 'Build type'
+        required: false
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - snapshot
+      skip_tests:
+        description: 'Skip tests during build'
+        required: false
+        default: true
+        type: boolean
 env:
+  # Configuration for artifacts repository
+  HADOOP_REPO: ${{ github.event.inputs.hadoop_repo || 'https://github.com/apache/hadoop.git' }}
+  HADOOP_BRANCH: ${{ github.event.inputs.hadoop_branch || 'trunk' }}
+  BUILD_TYPE: ${{ github.event.inputs.build_type || 'release' }}
+  SKIP_TESTS: ${{ github.event.inputs.skip_tests || 'true' }}
+  
   # Version requirements from BUILDING.txt
   JAVA_VERSION: '8'
   MAVEN_VERSION: '3.3.9'
@@ -22,10 +49,26 @@ jobs:
     runs-on: windows-latest  # Uses Windows Server 2022
     
     steps:
-    - name: Checkout Hadoop Repository
+    - name: Checkout Artifacts Repository
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0
+        path: artifacts-repo
+
+    - name: Clone Hadoop Repository
+      run: |
+        git clone --depth 1 --branch ${{ env.HADOOP_BRANCH }} ${{ env.HADOOP_REPO }} hadoop-source
+        cd hadoop-source
+        echo "Cloned Hadoop repository:"
+        echo "Repository: ${{ env.HADOOP_REPO }}"
+        echo "Branch/Tag: ${{ env.HADOOP_BRANCH }}"
+        echo "Commit: $(git rev-parse HEAD)"
+        echo "HADOOP_COMMIT=$(git rev-parse HEAD)" >> $env:GITHUB_ENV
+        echo "HADOOP_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)" >> $env:GITHUB_ENV
+
+    - name: Set Working Directory
+      run: |
+        cd hadoop-source
+        echo "HADOOP_SOURCE_DIR=$PWD" >> $env:GITHUB_ENV
 
     - name: Set up JDK 8
       uses: actions/setup-java@v4
@@ -134,11 +177,18 @@ jobs:
 
     - name: Build Hadoop (Clean Package)
       shell: cmd
+      working-directory: hadoop-source
       run: |
         set classpath=
+        if "%SKIP_TESTS%"=="true" (
+          set TEST_ARGS=-DskipTests
+        ) else (
+          set TEST_ARGS=
+        )
+        
         mvn clean package ^
           -Dhttps.protocols=TLSv1.2 ^
-          -DskipTests ^
+          %TEST_ARGS% ^
           -DskipDocs ^
           -Pnative-win,dist ^
           -Dskip.platformToolsetDetection ^
@@ -155,9 +205,10 @@ jobs:
           -Dwindows.no.sasl=on ^
           -Duse.platformToolsetVersion=v142
 
-    - name: Run Tests (Optional - Commented out due to long execution time)
+    - name: Run Tests (Optional)
       shell: cmd
-      if: false  # Set to true to enable tests
+      working-directory: hadoop-source
+      if: env.SKIP_TESTS == 'false'
       run: |
         mvn test ^
           -Pnative-win ^
@@ -173,34 +224,112 @@ jobs:
 
     - name: Create Release Tarball
       shell: bash
+      working-directory: hadoop-source
       run: |
         export IS_WINDOWS=1
         export MVN_ARGS="-Dshell-executable=/c/Program\ Files/Git/bin/bash.exe -Dhttps.protocols=TLSv1.2 -Pnative-win -Dskip.platformToolsetDetection -Drequire.openssl -Dopenssl.prefix=C:/vcpkg/installed/x64-windows -Dcmake.prefix.path=C:/vcpkg/installed/x64-windows -Dwindows.cmake.toolchain.file=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -Dwindows.cmake.build.type=RelWithDebInfo -Dwindows.build.hdfspp.dll=off -Duse.platformToolsetVersion=v142 -Dwindows.no.sasl=on -DskipTests -DskipDocs -Drequire.test.libhadoop"
         ./dev-support/bin/create-release --mvnargs="$MVN_ARGS"
 
+    - name: Copy Artifacts to Artifacts Repository
+      shell: bash
+      run: |
+        # Create artifacts directory structure
+        mkdir -p artifacts-repo/builds/windows/
+        TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+        BUILD_DIR="artifacts-repo/builds/windows/hadoop-${HADOOP_VERSION}-${TIMESTAMP}-${HADOOP_COMMIT:0:8}"
+        mkdir -p "$BUILD_DIR"
+        
+        # Copy build artifacts
+        if ls hadoop-source/hadoop-dist/target/*.tar.gz 1> /dev/null 2>&1; then
+          cp hadoop-source/hadoop-dist/target/*.tar.gz "$BUILD_DIR/"
+        fi
+        if ls hadoop-source/hadoop-dist/target/*.zip 1> /dev/null 2>&1; then
+          cp hadoop-source/hadoop-dist/target/*.zip "$BUILD_DIR/"
+        fi
+        
+        # Create build metadata
+        cat > "$BUILD_DIR/build-info.json" << EOF
+        {
+          "build_timestamp": "$TIMESTAMP",
+          "hadoop_version": "$HADOOP_VERSION",
+          "hadoop_commit": "$HADOOP_COMMIT",
+          "hadoop_branch": "$HADOOP_BRANCH",
+          "hadoop_repository": "$HADOOP_REPO",
+          "build_type": "$BUILD_TYPE",
+          "runner_os": "windows-latest",
+          "workflow_run_id": "${{ github.run_id }}",
+          "workflow_run_number": "${{ github.run_number }}"
+        }
+        EOF
+        
+        # Create/update index
+        echo "# Hadoop Windows Builds" > artifacts-repo/builds/windows/README.md
+        echo "" >> artifacts-repo/builds/windows/README.md
+        echo "## Latest Builds" >> artifacts-repo/builds/windows/README.md
+        echo "" >> artifacts-repo/builds/windows/README.md
+        
+        # List all build directories
+        for dir in artifacts-repo/builds/windows/hadoop-*; do
+          if [ -d "$dir" ]; then
+            basename_dir=$(basename "$dir")
+            if [ -f "$dir/build-info.json" ]; then
+              version=$(grep '"hadoop_version"' "$dir/build-info.json" | cut -d'"' -f4)
+              timestamp=$(grep '"build_timestamp"' "$dir/build-info.json" | cut -d'"' -f4)
+              commit=$(grep '"hadoop_commit"' "$dir/build-info.json" | cut -d'"' -f4)
+              echo "- **$basename_dir**" >> artifacts-repo/builds/windows/README.md
+              echo "  - Version: $version" >> artifacts-repo/builds/windows/README.md
+              echo "  - Built: $timestamp" >> artifacts-repo/builds/windows/README.md
+              echo "  - Commit: $commit" >> artifacts-repo/builds/windows/README.md
+              echo "" >> artifacts-repo/builds/windows/README.md
+            fi
+          fi
+        done
+        
+        echo "BUILD_DIR_NAME=$(basename $BUILD_DIR)" >> $GITHUB_ENV
+
     - name: Upload Build Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: hadoop-windows-build
+        name: hadoop-windows-build-${{ env.HADOOP_VERSION }}-${{ env.HADOOP_COMMIT }}
         path: |
-          hadoop-dist/target/*.tar.gz
-          hadoop-dist/target/*.zip
-        retention-days: 30
+          hadoop-source/hadoop-dist/target/*.tar.gz
+          hadoop-source/hadoop-dist/target/*.zip
+        retention-days: 90
 
     - name: Upload Test Results
       uses: actions/upload-artifact@v4
-      if: always()
+      if: always() && env.SKIP_TESTS == 'false'
       with:
-        name: test-results
+        name: test-results-${{ env.HADOOP_VERSION }}-${{ env.HADOOP_COMMIT }}
         path: |
-          **/target/surefire-reports/*.xml
-          **/target/failsafe-reports/*.xml
-        retention-days: 7
+          hadoop-source/**/target/surefire-reports/*.xml
+          hadoop-source/**/target/failsafe-reports/*.xml
+        retention-days: 30
+
+    - name: Commit Artifacts to Repository
+      if: github.event_name != 'pull_request'
+      run: |
+        cd artifacts-repo
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add builds/
+        if git diff --staged --quiet; then
+          echo "No changes to commit"
+        else
+          git commit -m "Add Hadoop ${{ env.HADOOP_VERSION }} Windows build - ${{ env.BUILD_DIR_NAME }}"
+          git push
+        fi
 
     - name: Build Summary
       shell: bash
       run: |
         echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+        echo "### Source Information" >> $GITHUB_STEP_SUMMARY
+        echo "- Repository: ${{ env.HADOOP_REPO }}" >> $GITHUB_STEP_SUMMARY
+        echo "- Branch/Tag: ${{ env.HADOOP_BRANCH }}" >> $GITHUB_STEP_SUMMARY
+        echo "- Commit: ${{ env.HADOOP_COMMIT }}" >> $GITHUB_STEP_SUMMARY
+        echo "- Version: ${{ env.HADOOP_VERSION }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
         echo "### Environment" >> $GITHUB_STEP_SUMMARY
         echo "- OS: Windows Server 2022 (windows-latest)" >> $GITHUB_STEP_SUMMARY
         echo "- Java: $(java -version 2>&1 | head -n1)" >> $GITHUB_STEP_SUMMARY
@@ -208,16 +337,18 @@ jobs:
         echo "- CMake: $(cmake --version | head -n1)" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### Build Configuration" >> $GITHUB_STEP_SUMMARY
+        echo "- Build Type: ${{ env.BUILD_TYPE }}" >> $GITHUB_STEP_SUMMARY
+        echo "- Tests Skipped: ${{ env.SKIP_TESTS }}" >> $GITHUB_STEP_SUMMARY
         echo "- Native Windows build enabled" >> $GITHUB_STEP_SUMMARY
         echo "- OpenSSL support: Yes" >> $GITHUB_STEP_SUMMARY
         echo "- YARN UI v2: Yes" >> $GITHUB_STEP_SUMMARY
-        echo "- Tests: Skipped (can be enabled)" >> $GITHUB_STEP_SUMMARY
         echo "- Documentation: Skipped" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        if ls hadoop-dist/target/*.tar.gz 1> /dev/null 2>&1; then
+        if ls hadoop-source/hadoop-dist/target/*.tar.gz 1> /dev/null 2>&1; then
           echo "### Artifacts Created" >> $GITHUB_STEP_SUMMARY
           echo "✅ Distribution tarball created successfully" >> $GITHUB_STEP_SUMMARY
-          echo "📦 Available in hadoop-dist/target/" >> $GITHUB_STEP_SUMMARY
+          echo "📦 Available in: ${{ env.BUILD_DIR_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "🗂️ Committed to artifacts repository" >> $GITHUB_STEP_SUMMARY
         else
           echo "### Build Status" >> $GITHUB_STEP_SUMMARY
           echo "❌ Distribution tarball creation failed" >> $GITHUB_STEP_SUMMARY
