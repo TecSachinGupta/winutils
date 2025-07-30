@@ -249,18 +249,18 @@ jobs:
             "MINIMAL_SUCCESS=false" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           }
 
-      - name: Build Strategy 2 - Native Maven Build
+      - name: Build Strategy 2 - Native Components Only
         shell: powershell
         run: |
           Set-Location hadoop
-          Write-Host "Building with native libraries..."
+          Write-Host "Building native components only (skip dist module)..."
           
           $buildScript = @'
           call "%VCVARS_PATH%"
           set JAVA_HOME=%JAVA_HOME%
           set MAVEN_OPTS=%MAVEN_OPTS%
           set PLATFORM=%PLATFORM%
-          mvn clean package -Pnative-win -Pdist -DskipTests -Dtar -Dmaven.javadoc.skip=true -Drequire.snappy=false -Drequire.openssl=false
+          mvn clean compile -pl hadoop-common-project/hadoop-common,hadoop-hdfs-project/hadoop-hdfs -Pnative-win -DskipTests -Dmaven.javadoc.skip=true -Drequire.snappy=false -Drequire.openssl=false
           '@
           
           $buildScript | Out-File -FilePath "build_native.bat" -Encoding ascii
@@ -292,12 +292,12 @@ jobs:
             if (Test-Path $module) {
               Write-Host "Building module: $module"
               
-              $buildScript = @"
+              $buildScript = @'
               call "%VCVARS_PATH%"
               set JAVA_HOME=%JAVA_HOME%
               set MAVEN_OPTS=%MAVEN_OPTS%
-              mvn compile -pl $module -Pnative-win -DskipTests -Dmaven.javadoc.skip=true -Drequire.snappy=false -Drequire.openssl=false -q
-              "@
+              mvn compile -pl {0} -Pnative-win -DskipTests -Dmaven.javadoc.skip=true -Drequire.snappy=false -Drequire.openssl=false -q
+              '@ -f $module
               
               $buildScript | Out-File -FilePath "build_module.bat" -Encoding ascii
               
@@ -331,12 +331,12 @@ jobs:
               Remove-Item -Recurse -Force "build" -ErrorAction SilentlyContinue
             }
             
-            $buildScript = @"
+            $buildScript = @'
             call "%VCVARS_PATH%"
             set JAVA_HOME=%JAVA_HOME%
             cmake . -B build -G "%CMAKE_GENERATOR%" -A %PLATFORM% -DJVM_ARCH_DATA_MODEL=64 -DREQUIRE_LIBWEBHDFS=OFF -DREQUIRE_SNAPPY=OFF -DREQUIRE_OPENSSL=OFF -DREQUIRE_ZSTD=OFF
             cmake --build build --config Release --parallel
-            "@
+            '@
             
             $buildScript | Out-File -FilePath "cmake_build.bat" -Encoding ascii
             
@@ -374,10 +374,10 @@ jobs:
               foreach ($sln in $slnFiles) {
                 Write-Host "Building solution: $($sln.Name)"
                 
-                $buildScript = @"
+                $buildScript = @'
                 call "%VCVARS_PATH%"
-                msbuild "$($sln.FullName)" /p:Configuration=Release /p:Platform=x64 /m
-                "@
+                msbuild "{0}" /p:Configuration=Release /p:Platform=x64 /m
+                '@ -f $sln.FullName
                 
                 $buildScript | Out-File -FilePath "build_sln.bat" -Encoding ascii
                 
@@ -394,10 +394,10 @@ jobs:
               foreach ($proj in $vcxprojFiles) {
                 Write-Host "Building project: $($proj.Name)"
                 
-                $buildScript = @"
+                $buildScript = @'
                 call "%VCVARS_PATH%"
-                msbuild "$($proj.FullName)" /p:Configuration=Release /p:Platform=x64
-                "@
+                msbuild "{0}" /p:Configuration=Release /p:Platform=x64
+                '@ -f $proj.FullName
                 
                 $buildScript | Out-File -FilePath "build_proj.bat" -Encoding ascii
                 
@@ -615,7 +615,7 @@ jobs:
           
           This package was built using multiple strategies:
           1. Minimal Java build without external dependencies
-          2. Native Maven build with -Pnative-win -Pdist profiles
+          2. Native component build with -Pnative-win profile
           3. Individual module builds with native profiles  
           4. Direct CMake builds for native components
           5. MSBuild for Windows-specific utilities
@@ -662,7 +662,7 @@ jobs:
           
           Build Strategies Attempted:
           1. Minimal build without external dependencies: $env:MINIMAL_SUCCESS
-          2. Native Maven build with -Pnative-win -Pdist: $env:NATIVE_SUCCESS
+          2. Native component build with -Pnative-win: $env:NATIVE_SUCCESS
           3. Individual module builds with native profiles: $env:MODULE_SUCCESS
           4. Direct CMake build in native source directory: $env:CMAKE_SUCCESS
           5. Direct MSBuild on winutils projects: $env:WINUTILS_SUCCESS
