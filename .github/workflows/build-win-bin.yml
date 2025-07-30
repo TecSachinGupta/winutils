@@ -1,0 +1,249 @@
+name: Build Hadoop on Windows
+
+on:
+  workflow_dispatch:
+
+env:
+  # Version requirements from BUILDING.txt
+  JAVA_VERSION: '8'
+  MAVEN_VERSION: '3.3.9'
+  BOOST_VERSION: '1.86.0'
+  PROTOBUF_VERSION: '3.21.12'
+  CMAKE_VERSION: '3.19.8'
+  VCPKG_COMMIT: '2025.03.19'
+  ZLIB_VERSION: '1.2.7'
+
+jobs:
+  build-hadoop-windows:
+    runs-on: windows-2019
+    
+    steps:
+    - name: Checkout Hadoop Repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up JDK 8
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ env.JAVA_VERSION }}
+        distribution: 'temurin'
+
+    - name: Set up Maven
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ env.JAVA_VERSION }}
+        distribution: 'temurin'
+        maven-version: ${{ env.MAVEN_VERSION }}
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x'
+
+    - name: Setup Git (with Unix tools)
+      run: |
+        # Ensure Git with Unix tools is available
+        echo "C:\Program Files\Git\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        echo "C:\Program Files\Git\usr\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v1.3
+
+    - name: Setup MSVC Dev Environment
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
+        toolset: 14.29
+
+    - name: Cache vcpkg
+      uses: actions/cache@v3
+      id: cache-vcpkg
+      with:
+        path: |
+          C:\vcpkg
+          C:\Users\runneradmin\.vcpkg
+        key: ${{ runner.os }}-vcpkg-${{ env.VCPKG_COMMIT }}-${{ env.BOOST_VERSION }}-${{ env.PROTOBUF_VERSION }}
+        restore-keys: |
+          ${{ runner.os }}-vcpkg-${{ env.VCPKG_COMMIT }}-
+
+    - name: Install vcpkg and dependencies
+      if: steps.cache-vcpkg.outputs.cache-hit != 'true'
+      shell: cmd
+      run: |
+        cd C:\
+        git clone https://github.com/microsoft/vcpkg.git
+        cd vcpkg
+        git fetch --all
+        git checkout %VCPKG_COMMIT%
+        call bootstrap-vcpkg.bat
+        echo {^
+          "name": "hadoop-dependencies",^
+          "version": "1.0.0",^
+          "dependencies": [^
+            "boost-system",^
+            "boost-filesystem",^
+            "boost-thread",^
+            "boost-iostreams",^
+            "protobuf",^
+            "openssl",^
+            "zlib"^
+          ]^
+        } > vcpkg.json
+        vcpkg.exe install --x-install-root .\installed
+
+    - name: Cache Maven dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.m2/repository
+        key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+        restore-keys: |
+          ${{ runner.os }}-maven-
+
+    - name: Set Environment Variables
+      shell: cmd
+      run: |
+        echo PROTOBUF_HOME=C:\vcpkg\installed\x64-windows>> %GITHUB_ENV%
+        echo ZLIB_HOME=C:\vcpkg\installed\x64-windows>> %GITHUB_ENV%
+        echo OPENSSL_ROOT_DIR=C:\vcpkg\installed\x64-windows>> %GITHUB_ENV%
+        echo MAVEN_OPTS=-Xmx2048M -Xss128M>> %GITHUB_ENV%
+        echo IS_WINDOWS=1>> %GITHUB_ENV%
+
+    - name: Verify Dependencies
+      shell: cmd
+      run: |
+        echo "=== Java Version ==="
+        java -version
+        echo "=== Maven Version ==="
+        mvn --version
+        echo "=== CMake Version ==="
+        cmake --version
+        echo "=== Git Version ==="
+        git --version
+        echo "=== Python Version ==="
+        python --version
+        echo "=== Environment Variables ==="
+        echo PROTOBUF_HOME=%PROTOBUF_HOME%
+        echo ZLIB_HOME=%ZLIB_HOME%
+        echo OPENSSL_ROOT_DIR=%OPENSSL_ROOT_DIR%
+        echo MAVEN_OPTS=%MAVEN_OPTS%
+
+    - name: Build Hadoop (Clean Package)
+      shell: cmd
+      run: |
+        set classpath=
+        mvn clean package ^
+          -Dhttps.protocols=TLSv1.2 ^
+          -DskipTests ^
+          -DskipDocs ^
+          -Pnative-win,dist ^
+          -Dskip.platformToolsetDetection ^
+          -Drequire.openssl ^
+          -Drequire.test.libhadoop ^
+          -Pyarn-ui ^
+          -Dshell-executable=C:\Program Files\Git\bin\bash.exe ^
+          -Dtar ^
+          -Dopenssl.prefix=C:\vcpkg\installed\x64-windows ^
+          -Dcmake.prefix.path=C:\vcpkg\installed\x64-windows ^
+          -Dwindows.cmake.toolchain.file=C:\vcpkg\scripts\buildsystems\vcpkg.cmake ^
+          -Dwindows.cmake.build.type=RelWithDebInfo ^
+          -Dwindows.build.hdfspp.dll=off ^
+          -Dwindows.no.sasl=on ^
+          -Duse.platformToolsetVersion=v142
+
+    - name: Run Tests (Optional - Commented out due to long execution time)
+      shell: cmd
+      if: false  # Set to true to enable tests
+      run: |
+        mvn test ^
+          -Pnative-win ^
+          -Dskip.platformToolsetDetection ^
+          -Drequire.openssl ^
+          -Dopenssl.prefix=C:\vcpkg\installed\x64-windows ^
+          -Dcmake.prefix.path=C:\vcpkg\installed\x64-windows ^
+          -Dwindows.cmake.toolchain.file=C:\vcpkg\scripts\buildsystems\vcpkg.cmake ^
+          -Dwindows.cmake.build.type=RelWithDebInfo ^
+          -Dwindows.build.hdfspp.dll=off ^
+          -Dwindows.no.sasl=on ^
+          -Duse.platformToolsetVersion=v142
+
+    - name: Create Release Tarball
+      shell: bash
+      run: |
+        export IS_WINDOWS=1
+        export MVN_ARGS="-Dshell-executable=/c/Program\ Files/Git/bin/bash.exe -Dhttps.protocols=TLSv1.2 -Pnative-win -Dskip.platformToolsetDetection -Drequire.openssl -Dopenssl.prefix=C:/vcpkg/installed/x64-windows -Dcmake.prefix.path=C:/vcpkg/installed/x64-windows -Dwindows.cmake.toolchain.file=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -Dwindows.cmake.build.type=RelWithDebInfo -Dwindows.build.hdfspp.dll=off -Duse.platformToolsetVersion=v142 -Dwindows.no.sasl=on -DskipTests -DskipDocs -Drequire.test.libhadoop"
+        ./dev-support/bin/create-release --mvnargs="$MVN_ARGS"
+
+    - name: Upload Build Artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: hadoop-windows-build
+        path: |
+          hadoop-dist/target/*.tar.gz
+          hadoop-dist/target/*.zip
+        retention-days: 30
+
+    - name: Upload Test Results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results
+        path: |
+          **/target/surefire-reports/*.xml
+          **/target/failsafe-reports/*.xml
+        retention-days: 7
+
+    - name: Build Summary
+      shell: bash
+      run: |
+        echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+        echo "### Environment" >> $GITHUB_STEP_SUMMARY
+        echo "- OS: Windows Server 2019" >> $GITHUB_STEP_SUMMARY
+        echo "- Java: $(java -version 2>&1 | head -n1)" >> $GITHUB_STEP_SUMMARY
+        echo "- Maven: $(mvn --version | head -n1)" >> $GITHUB_STEP_SUMMARY
+        echo "- CMake: $(cmake --version | head -n1)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Build Configuration" >> $GITHUB_STEP_SUMMARY
+        echo "- Native Windows build enabled" >> $GITHUB_STEP_SUMMARY
+        echo "- OpenSSL support: Yes" >> $GITHUB_STEP_SUMMARY
+        echo "- YARN UI v2: Yes" >> $GITHUB_STEP_SUMMARY
+        echo "- Tests: Skipped (can be enabled)" >> $GITHUB_STEP_SUMMARY
+        echo "- Documentation: Skipped" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        if ls hadoop-dist/target/*.tar.gz 1> /dev/null 2>&1; then
+          echo "### Artifacts Created" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Distribution tarball created successfully" >> $GITHUB_STEP_SUMMARY
+          echo "📦 Available in hadoop-dist/target/" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "### Build Status" >> $GITHUB_STEP_SUMMARY
+          echo "❌ Distribution tarball creation failed" >> $GITHUB_STEP_SUMMARY
+        fi
+
+  # Optional job for compatibility checking
+  compatibility-check:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up JDK 8
+      uses: actions/setup-java@v4
+      with:
+        java-version: '8'
+        distribution: 'temurin'
+
+    - name: Setup Python for compatibility check
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x'
+
+    - name: Run Compatibility Check
+      run: |
+        # Install Java API Compliance Checker if needed
+        # This step would need the appropriate base branch reference
+        echo "Compatibility check would run here"
+        # ./dev-support/bin/checkcompatibility.py --annotation org.apache.hadoop.classification.InterfaceAudience.Public --annotation org.apache.hadoop.classification.InterfaceAudience.LimitedPrivate --include "hadoop.*" ${{ github.base_ref }} ${{ github.head_ref }}
