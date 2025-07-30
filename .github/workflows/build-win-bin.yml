@@ -1,6 +1,10 @@
 name: Build Hadoop on Windows
 
 on:
+  push:
+    branches: [ main, trunk, branch-* ]
+  pull_request:
+    branches: [ main, trunk, branch-* ]
   workflow_dispatch:
 
 env:
@@ -15,7 +19,7 @@ env:
 
 jobs:
   build-hadoop-windows:
-    runs-on: windows-2019
+    runs-on: windows-latest  # Uses Windows Server 2022
     
     steps:
     - name: Checkout Hadoop Repository
@@ -198,7 +202,7 @@ jobs:
       run: |
         echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
         echo "### Environment" >> $GITHUB_STEP_SUMMARY
-        echo "- OS: Windows Server 2019" >> $GITHUB_STEP_SUMMARY
+        echo "- OS: Windows Server 2022 (windows-latest)" >> $GITHUB_STEP_SUMMARY
         echo "- Java: $(java -version 2>&1 | head -n1)" >> $GITHUB_STEP_SUMMARY
         echo "- Maven: $(mvn --version | head -n1)" >> $GITHUB_STEP_SUMMARY
         echo "- CMake: $(cmake --version | head -n1)" >> $GITHUB_STEP_SUMMARY
@@ -219,7 +223,31 @@ jobs:
           echo "❌ Distribution tarball creation failed" >> $GITHUB_STEP_SUMMARY
         fi
 
-  # Optional job for compatibility checking
+  # Alternative job for Windows Server 2025 (if needed for latest features)
+  build-hadoop-windows-2025:
+    runs-on: windows-2025
+    if: false  # Set to true to enable Windows Server 2025 build
+    
+    steps:
+    # Same steps as above job, but with potential VS 2022 toolset adjustments
+    - name: Checkout Hadoop Repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup MSVC Dev Environment (VS 2022)
+      uses: ilammy/msvc-dev-cmd@v1.3
+      with:
+        arch: x64
+        # Windows Server 2025 may require VS 2022 toolset v143
+        toolset: 14.3
+
+    # Note: This job would need all the same steps as the main job
+    # but with potential toolset version adjustments
+    - name: Build Info
+      run: |
+        echo "Building on Windows Server 2025 with VS 2022 toolset"
+        echo "May require -Duse.platformToolsetVersion=v143 instead of v142"
   compatibility-check:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
