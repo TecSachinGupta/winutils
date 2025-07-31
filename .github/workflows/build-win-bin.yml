@@ -442,16 +442,15 @@ jobs:
           set TEST_ARGS=
         )
         
-        REM First attempt: Try with full native build
-        echo Attempting full native build...
-        mvn clean package ^
+        REM Attempt 1: Build everything except hadoop-common first
+        echo === Attempt 1: Building all modules except hadoop-common ===
+        mvn clean install ^
           -Dhttps.protocols=TLSv1.2 ^
           %TEST_ARGS% ^
           -DskipDocs ^
           -Pnative-win,dist ^
           -Dskip.platformToolsetDetection ^
           -Drequire.openssl ^
-          -Drequire.test.libhadoop ^
           -Pyarn-ui ^
           -Dshell-executable="C:\Program Files\Git\bin\bash.exe" ^
           -Dtar ^
@@ -462,72 +461,96 @@ jobs:
           -Dwindows.build.hdfspp.dll=off ^
           -Dwindows.no.sasl=on ^
           -Duse.platformToolsetVersion=v143 ^
-          -T 1C
+          -T 1C ^
+          -pl "!hadoop-common-project/hadoop-common"
         
         if errorlevel 1 (
-          echo ❌ Full native build failed, trying fallback approach...
+          echo ❌ Build failed at module level, trying without native profile...
+          goto :fallback_no_native
+        )
+        
+        REM Attempt 2: Build hadoop-common without winutils
+        echo === Attempt 2: Building hadoop-common without winutils ===
+        mvn install ^
+          -Dhttps.protocols=TLSv1.2 ^
+          %TEST_ARGS% ^
+          -DskipDocs ^
+          -Pnative-win ^
+          -Dskip.platformToolsetDetection ^
+          -Drequire.openssl ^
+          -Dshell-executable="C:\Program Files\Git\bin\bash.exe" ^
+          -Dopenssl.prefix=C:\vcpkg\installed\x64-windows ^
+          -Dcmake.prefix.path=C:\vcpkg\installed\x64-windows ^
+          -Dwindows.cmake.toolchain.file=C:\vcpkg\scripts\buildsystems\vcpkg.cmake ^
+          -Dwindows.cmake.build.type=RelWithDebInfo ^
+          -Dwindows.build.hdfspp.dll=off ^
+          -Dwindows.no.sasl=on ^
+          -Duse.platformToolsetVersion=v143 ^
+          -T 1C ^
+          -Dexec.skip=true ^
+          -pl "hadoop-common-project/hadoop-common"
+        
+        if errorlevel 1 (
+          echo ⚠️ hadoop-common native build failed, building without native components...
           
-          REM Fallback 1: Skip winutils compilation specifically
-          echo Attempting build without winutils compilation...
-          mvn clean package ^
+          REM Build hadoop-common without native
+          mvn install ^
             -Dhttps.protocols=TLSv1.2 ^
             %TEST_ARGS% ^
             -DskipDocs ^
-            -Pnative-win,dist ^
-            -Dskip.platformToolsetDetection ^
-            -Drequire.openssl ^
-            -Pyarn-ui ^
-            -Dshell-executable="C:\Program Files\Git\bin\bash.exe" ^
-            -Dtar ^
-            -Dopenssl.prefix=C:\vcpkg\installed\x64-windows ^
-            -Dcmake.prefix.path=C:\vcpkg\installed\x64-windows ^
-            -Dwindows.cmake.toolchain.file=C:\vcpkg\scripts\buildsystems\vcpkg.cmake ^
-            -Dwindows.cmake.build.type=RelWithDebInfo ^
-            -Dwindows.build.hdfspp.dll=off ^
-            -Dwindows.no.sasl=on ^
-            -Duse.platformToolsetVersion=v143 ^
-            -Dwinutils.skip=true ^
-            -T 1C
+            -T 1C ^
+            -pl "hadoop-common-project/hadoop-common"
           
           if errorlevel 1 (
-            echo ❌ Winutils skip failed, trying build without native profile...
-            
-            REM Fallback 2: Build without native-win profile entirely
-            mvn clean package ^
-              -Dhttps.protocols=TLSv1.2 ^
-              %TEST_ARGS% ^
-              -DskipDocs ^
-              -Pdist ^
-              -Pyarn-ui ^
-              -Dtar ^
-              -T 1C
-            
-            if errorlevel 1 (
-              echo ❌ All build attempts failed
-              
-              REM Final attempt: Basic build
-              echo Trying basic build without any special profiles...
-              mvn clean package ^
-                -Dhttps.protocols=TLSv1.2 ^
-                %TEST_ARGS% ^
-                -DskipDocs ^
-                -T 1C
-              
-              if errorlevel 1 (
-                echo ❌ All build attempts failed completely
-                exit /b 1
-              ) else (
-                echo ⚠️ Basic build succeeded (minimal distribution)
-              )
-            ) else (
-              echo ⚠️ Non-native build succeeded
-            )
+            echo ❌ hadoop-common build failed completely
+            goto :fallback_no_native
           ) else (
-            echo ⚠️ Fallback build succeeded (without winutils)
+            echo ✅ hadoop-common built without native components
           )
         ) else (
-          echo ✅ Full native build completed successfully
+          echo ✅ hadoop-common built with native components (no winutils)
         )
+        
+        REM Attempt 3: Create final distribution
+        echo === Attempt 3: Creating distribution package ===
+        mvn package ^
+          -Dhttps.protocols=TLSv1.2 ^
+          %TEST_ARGS% ^
+          -DskipDocs ^
+          -Pdist ^
+          -Pyarn-ui ^
+          -Dtar ^
+          -T 1C ^
+          -pl "hadoop-dist"
+        
+        if errorlevel 1 (
+          echo ❌ Distribution creation failed
+          goto :fallback_no_native
+        ) else (
+          echo ✅ Distribution created successfully
+          goto :build_success
+        )
+        
+        :fallback_no_native
+        echo === Fallback: Complete build without native components ===
+        mvn clean package ^
+          -Dhttps.protocols=TLSv1.2 ^
+          %TEST_ARGS% ^
+          -DskipDocs ^
+          -Pdist ^
+          -Pyarn-ui ^
+          -Dtar ^
+          -T 1C
+        
+        if errorlevel 1 (
+          echo ❌ All build attempts failed
+          exit /b 1
+        ) else (
+          echo ⚠️ Fallback build succeeded (no native components)
+        )
+        
+        :build_success
+        echo ✅ Hadoop build process completed
 
     - name: Run Tests
       shell: cmd
