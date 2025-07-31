@@ -28,7 +28,7 @@ on:
         required: false
         default: true
         type: boolean
-env:
+
   # Configuration for artifacts repository
   HADOOP_REPO: ${{ github.event.inputs.hadoop_repo || 'https://github.com/apache/hadoop.git' }}
   HADOOP_BRANCH: ${{ github.event.inputs.hadoop_branch || 'trunk' }}
@@ -56,46 +56,236 @@ jobs:
 
     - name: Enable Long Paths on Windows
       run: |
-        # Enable long path support for Git
+        Write-Host "=== Enabling Long Path Support ==="
+        
+        # Enable long path support for Git globally
         git config --global core.longpaths true
+        Write-Host "Git long paths enabled globally"
+        
+        # Check current Git configuration
+        Write-Host "Current Git long paths setting: $(git config --global core.longpaths)"
         
         # Enable long path support at system level (requires admin)
-        # This is often already enabled on GitHub runners, but we'll try anyway
         try {
+          $currentValue = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -ErrorAction SilentlyContinue
+          if ($currentValue) {
+            Write-Host "Current LongPathsEnabled value: $($currentValue.LongPathsEnabled)"
+          } else {
+            Write-Host "LongPathsEnabled registry key not found"
+          }
+          
           New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
-          Write-Host "Long paths enabled successfully"
+          Write-Host "Long paths enabled successfully in registry"
         } catch {
-          Write-Host "Long paths may already be enabled or require different permissions"
+          Write-Host "Registry modification failed (may not have permissions): $($_.Exception.Message)"
+        }
+        
+        # Test path length limits
+        Write-Host "=== Testing Path Length Support ==="
+        $testPath = "C:\very_long_test_directory_name_to_check_if_long_paths_are_working_properly_on_this_system_with_maximum_character_limits"
+        try {
+          New-Item -ItemType Directory -Path $testPath -Force
+          Write-Host "✅ Long path test successful - created directory with $(($testPath).Length) characters"
+          Remove-Item -Path $testPath -Force
+        } catch {
+          Write-Host "❌ Long path test failed: $($_.Exception.Message)"
+        }
+
+    - name: Prepare Short Path Directory
+      run: |
+        Write-Host "=== Preparing Short Path Directory ==="
+        
+        $shortPath = "C:\h"
+        if (Test-Path $shortPath) {
+          Write-Host "Removing existing directory: $shortPath"
+          Remove-Item -Recurse -Force $shortPath
+        }
+        
+        # Pre-create the directory
+        New-Item -ItemType Directory -Path $shortPath -Force
+        Write-Host "Created short path directory: $shortPath"
+        
+        # Set directory permissions to full control
+        try {
+          $acl = Get-Acl $shortPath
+          $accessRule = New-Object System.Security.AccessControl.FileSystemAccessRule("Everyone","FullControl","Allow")
+          $acl.SetAccessRule($accessRule)
+          Set-Acl -Path $shortPath -AclObject $acl
+          Write-Host "Set full permissions on directory"
+        } catch {
+          Write-Host "Could not set permissions: $($_.Exception.Message)"
         }
 
     - name: Clone Hadoop Repository
       run: |
-        # Use a very short path to avoid Windows path limitations
+        Write-Host "=== Cloning Hadoop Repository ==="
+        
         $shortPath = "C:\h"
-        if (Test-Path $shortPath) {
-          Remove-Item -Recurse -Force $shortPath
+        $repo = "${{ env.HADOOP_REPO }}"
+        $branch = "${{ env.HADOOP_BRANCH }}"
+        
+        Write-Host "Repository: $repo"
+        Write-Host "Branch/Tag: $branch"
+        Write-Host "Target Path: $shortPath"
+        Write-Host "Current Directory: $(Get-Location)"
+        
+        # Set Git configuration for this operation
+        git config --global core.autocrlf false
+        git config --global core.longpaths true
+        git config --global core.preloadindex true
+        git config --global core.fscache true
+        
+        Write-Host "Git configurations set"
+        
+        # Change to C:\ to minimize path length during clone
+        Set-Location C:\
+        
+        try {
+          Write-Host "Starting git clone..."
+          
+          # Use sparse-checkout to potentially reduce issues
+          git clone --filter=blob:none --config core.longpaths=true --depth 1 --branch $branch $repo h
+          
+          Write-Host "Clone completed, checking status..."
+          
+          Set-Location h
+          
+          # Force checkout to resolve any issues
+          Write-Host "Forcing checkout of all files..."
+          git config core.longpaths true
+          git checkout HEAD -- .
+          
+          Write-Host "Repository cloned successfully!"
+          
+          $commit = git rev-parse HEAD
+          Write-Host "Commit: $commit"
+          echo "HADOOP_COMMIT=$commit" >> $env:GITHUB_ENV
+          
+          # Get version using Maven
+          Write-Host "Getting Hadoop version..."
+          $version = mvn help:evaluate -Dexpression=project.version -q -DforceStdout
+          Write-Host "Version: $version"
+          echo "HADOOP_VERSION=$version" >> $env:GITHUB_ENV
+          echo "HADOOP_SOURCE_DIR=C:\h" >> $env:GITHUB_ENV
+          
+        } catch {
+          Write-Host "❌ Clone failed with error: $($_.Exception.Message)"
+          
+          # Try alternative approach - shallow clone without branch specification
+          Write-Host "Trying alternative clone method..."
+          try {
+            if (Test-Path "h") { Remove-Item -Recurse -Force "h" }
+            
+            git init h
+            Set-Location h
+            git config core.longpaths true
+            git remote add origin $repo
+            git fetch --depth 1 origin $branch
+            git checkout FETCH_HEAD
+            
+            $commit = git rev-parse HEAD
+            Write-Host "Alternative clone successful! Commit: $commit"
+            echo "HADOOP_COMMIT=$commit" >> $env:GITHUB_ENV
+            
+            $version = mvn help:evaluate -Dexpression=project.version -q -DforceStdout
+            echo "HADOOP_VERSION=$version" >> $env:GITHUB_ENV
+            echo "HADOOP_SOURCE_DIR=C:\h" >> $env:GITHUB_ENV
+            
+          } catch {
+            Write-Host "❌ Alternative clone also failed: $($_.Exception.Message)"
+            
+            # List what we have
+            Write-Host "Current directory contents:"
+            Get-ChildItem -Force | Format-Table
+            
+            if (Test-Path "C:\h") {
+              Write-Host "Contents of C:\h:"
+              Get-ChildItem "C:\h" -Force | Format-Table
+            }
+            
+            throw "All clone attempts failed"
+          }
+        }
+
+    - name: Verify Repository State
+      run: |
+        Write-Host "=== Verifying Repository State ==="
+        
+        Set-Location C:\h
+        
+        Write-Host "Current directory: $(Get-Location)"
+        Write-Host "Directory contents:"
+        Get-ChildItem | Format-Table Name, Length, LastWriteTime
+        
+        Write-Host "Git status:"
+        git status --porcelain
+        
+        Write-Host "Checking for problematic long paths:"
+        $longPaths = @()
+        Get-ChildItem -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+          if ($_.FullName.Length -gt 240) {
+            $longPaths += $_.FullName
+          }
         }
         
-        # Clone to short path with long paths enabled
-        git clone --config core.longpaths=true --depth 1 --branch ${{ env.HADOOP_BRANCH }} ${{ env.HADOOP_REPO }} $shortPath
+        if ($longPaths.Count -gt 0) {
+          Write-Host "Found $($longPaths.Count) paths longer than 240 characters:"
+          $longPaths | ForEach-Object { Write-Host "  Length $($_.Length): $_" }
+        } else {
+          Write-Host "✅ No problematic long paths found"
+        }
         
-        cd $shortPath
-        echo "Cloned Hadoop repository:"
-        echo "Repository: ${{ env.HADOOP_REPO }}"
-        echo "Branch/Tag: ${{ env.HADOOP_BRANCH }}"
-        echo "Commit: $(git rev-parse HEAD)"
-        echo "HADOOP_COMMIT=$(git rev-parse HEAD)" >> $env:GITHUB_ENV
-        
-        # Get version using short path
-        $version = mvn help:evaluate -Dexpression=project.version -q -DforceStdout
-        echo "HADOOP_VERSION=$version" >> $env:GITHUB_ENV
-        echo "HADOOP_SOURCE_DIR=$shortPath" >> $env:GITHUB_ENV
-
-    - name: Set up JDK 8
+        # Verify key files exist
+        $keyFiles = @("pom.xml", "hadoop-dist/pom.xml", "dev-support/bin/create-release")
+        foreach ($file in $keyFiles) {
+          if (Test-Path $file) {
+            Write-Host "✅ Found: $file"
+          } else {
+            Write-Host "❌ Missing: $file"
+          }
+        }
       uses: actions/setup-java@v4
       with:
         java-version: ${{ env.JAVA_VERSION }}
         distribution: 'temurin'
+
+    - name: Verify Repository State
+      run: |
+        Write-Host "=== Verifying Repository State ==="
+        
+        Set-Location C:\h
+        
+        Write-Host "Current directory: $(Get-Location)"
+        Write-Host "Directory contents:"
+        Get-ChildItem | Format-Table Name, Length, LastWriteTime
+        
+        Write-Host "Git status:"
+        git status --porcelain
+        
+        Write-Host "Checking for problematic long paths:"
+        $longPaths = @()
+        Get-ChildItem -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+          if ($_.FullName.Length -gt 240) {
+            $longPaths += $_.FullName
+          }
+        }
+        
+        if ($longPaths.Count -gt 0) {
+          Write-Host "Found $($longPaths.Count) paths longer than 240 characters:"
+          $longPaths | ForEach-Object { Write-Host "  Length $($_.Length): $_" }
+        } else {
+          Write-Host "✅ No problematic long paths found"
+        }
+        
+        # Verify key files exist
+        $keyFiles = @("pom.xml", "hadoop-dist/pom.xml", "dev-support/bin/create-release")
+        foreach ($file in $keyFiles) {
+          if (Test-Path $file) {
+            Write-Host "✅ Found: $file"
+          } else {
+            Write-Host "❌ Missing: $file"
+          }
+        }
 
     - name: Set up Maven
       uses: actions/setup-java@v4
