@@ -445,7 +445,7 @@ jobs:
           -Dwindows.build.hdfspp.dll=off ^
           -Dwindows.no.sasl=on ^
           -Duse.platformToolsetVersion=v143 ^
-          -T v143
+          -T 1C
         
         if errorlevel 1 (
           echo ❌ Maven build failed
@@ -472,7 +472,7 @@ jobs:
           -Dwindows.build.hdfspp.dll=off ^
           -Dwindows.no.sasl=on ^
           -Duse.platformToolsetVersion=v143 ^
-          -T v143
+          -T 1C
         
         if errorlevel 1 (
           echo ❌ Tests failed
@@ -759,4 +759,4 @@ jobs:
           echo "✅ Using modern Java version: ${{ env.JAVA_VERSION }}"
         fi
         
-        echo "✅ Basic compatibility validation completed"
+        echo "✅ Basic compatibility validation completed" 
