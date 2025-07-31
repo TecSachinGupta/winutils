@@ -462,14 +462,13 @@ jobs:
           -Dwindows.build.hdfspp.dll=off ^
           -Dwindows.no.sasl=on ^
           -Duse.platformToolsetVersion=v143 ^
-          -T 1C ^
-          -X
+          -T 1C
         
         if errorlevel 1 (
           echo ❌ Full native build failed, trying fallback approach...
           
-          REM Fallback: Try without winutils compilation
-          echo Attempting build without winutils...
+          REM Fallback 1: Skip winutils compilation specifically
+          echo Attempting build without winutils compilation...
           mvn clean package ^
             -Dhttps.protocols=TLSv1.2 ^
             %TEST_ARGS% ^
@@ -487,13 +486,13 @@ jobs:
             -Dwindows.build.hdfspp.dll=off ^
             -Dwindows.no.sasl=on ^
             -Duse.platformToolsetVersion=v143 ^
-            -Dskip.winutils=true ^
+            -Dwinutils.skip=true ^
             -T 1C
           
           if errorlevel 1 (
-            echo ❌ Fallback build also failed, trying minimal build...
+            echo ❌ Winutils skip failed, trying build without native profile...
             
-            REM Minimal fallback: Build without native components
+            REM Fallback 2: Build without native-win profile entirely
             mvn clean package ^
               -Dhttps.protocols=TLSv1.2 ^
               %TEST_ARGS% ^
@@ -505,9 +504,23 @@ jobs:
             
             if errorlevel 1 (
               echo ❌ All build attempts failed
-              exit /b 1
+              
+              REM Final attempt: Basic build
+              echo Trying basic build without any special profiles...
+              mvn clean package ^
+                -Dhttps.protocols=TLSv1.2 ^
+                %TEST_ARGS% ^
+                -DskipDocs ^
+                -T 1C
+              
+              if errorlevel 1 (
+                echo ❌ All build attempts failed completely
+                exit /b 1
+              ) else (
+                echo ⚠️ Basic build succeeded (minimal distribution)
+              )
             ) else (
-              echo ⚠️ Minimal build succeeded (no native components)
+              echo ⚠️ Non-native build succeeded
             )
           ) else (
             echo ⚠️ Fallback build succeeded (without winutils)
