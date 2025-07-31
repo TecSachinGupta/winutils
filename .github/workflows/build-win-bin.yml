@@ -2,7 +2,7 @@ name: Build Hadoop on Windows (Artifacts Repository)
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main ]
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
@@ -54,21 +54,42 @@ jobs:
       with:
         path: artifacts-repo
 
+    - name: Enable Long Paths on Windows
+      run: |
+        # Enable long path support for Git
+        git config --global core.longpaths true
+        
+        # Enable long path support at system level (requires admin)
+        # This is often already enabled on GitHub runners, but we'll try anyway
+        try {
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
+          Write-Host "Long paths enabled successfully"
+        } catch {
+          Write-Host "Long paths may already be enabled or require different permissions"
+        }
+
     - name: Clone Hadoop Repository
       run: |
-        git clone --depth 1 --branch ${{ env.HADOOP_BRANCH }} ${{ env.HADOOP_REPO }} hadoop-source
-        cd hadoop-source
+        # Use a very short path to avoid Windows path limitations
+        $shortPath = "C:\h"
+        if (Test-Path $shortPath) {
+          Remove-Item -Recurse -Force $shortPath
+        }
+        
+        # Clone to short path with long paths enabled
+        git clone --config core.longpaths=true --depth 1 --branch ${{ env.HADOOP_BRANCH }} ${{ env.HADOOP_REPO }} $shortPath
+        
+        cd $shortPath
         echo "Cloned Hadoop repository:"
         echo "Repository: ${{ env.HADOOP_REPO }}"
         echo "Branch/Tag: ${{ env.HADOOP_BRANCH }}"
         echo "Commit: $(git rev-parse HEAD)"
         echo "HADOOP_COMMIT=$(git rev-parse HEAD)" >> $env:GITHUB_ENV
-        echo "HADOOP_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)" >> $env:GITHUB_ENV
-
-    - name: Set Working Directory
-      run: |
-        cd hadoop-source
-        echo "HADOOP_SOURCE_DIR=$PWD" >> $env:GITHUB_ENV
+        
+        # Get version using short path
+        $version = mvn help:evaluate -Dexpression=project.version -q -DforceStdout
+        echo "HADOOP_VERSION=$version" >> $env:GITHUB_ENV
+        echo "HADOOP_SOURCE_DIR=$shortPath" >> $env:GITHUB_ENV
 
     - name: Set up JDK 8
       uses: actions/setup-java@v4
@@ -177,7 +198,7 @@ jobs:
 
     - name: Build Hadoop (Clean Package)
       shell: cmd
-      working-directory: hadoop-source
+      working-directory: C:\h
       run: |
         set classpath=
         if "%SKIP_TESTS%"=="true" (
@@ -207,7 +228,7 @@ jobs:
 
     - name: Run Tests (Optional)
       shell: cmd
-      working-directory: hadoop-source
+      working-directory: C:\h
       if: env.SKIP_TESTS == 'false'
       run: |
         mvn test ^
@@ -224,7 +245,7 @@ jobs:
 
     - name: Create Release Tarball
       shell: bash
-      working-directory: hadoop-source
+      working-directory: /c/h
       run: |
         export IS_WINDOWS=1
         export MVN_ARGS="-Dshell-executable=/c/Program\ Files/Git/bin/bash.exe -Dhttps.protocols=TLSv1.2 -Pnative-win -Dskip.platformToolsetDetection -Drequire.openssl -Dopenssl.prefix=C:/vcpkg/installed/x64-windows -Dcmake.prefix.path=C:/vcpkg/installed/x64-windows -Dwindows.cmake.toolchain.file=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -Dwindows.cmake.build.type=RelWithDebInfo -Dwindows.build.hdfspp.dll=off -Duse.platformToolsetVersion=v142 -Dwindows.no.sasl=on -DskipTests -DskipDocs -Drequire.test.libhadoop"
@@ -239,12 +260,12 @@ jobs:
         BUILD_DIR="artifacts-repo/builds/windows/hadoop-${HADOOP_VERSION}-${TIMESTAMP}-${HADOOP_COMMIT:0:8}"
         mkdir -p "$BUILD_DIR"
         
-        # Copy build artifacts
-        if ls hadoop-source/hadoop-dist/target/*.tar.gz 1> /dev/null 2>&1; then
-          cp hadoop-source/hadoop-dist/target/*.tar.gz "$BUILD_DIR/"
+        # Copy build artifacts from short path
+        if ls /c/h/hadoop-dist/target/*.tar.gz 1> /dev/null 2>&1; then
+          cp /c/h/hadoop-dist/target/*.tar.gz "$BUILD_DIR/"
         fi
-        if ls hadoop-source/hadoop-dist/target/*.zip 1> /dev/null 2>&1; then
-          cp hadoop-source/hadoop-dist/target/*.zip "$BUILD_DIR/"
+        if ls /c/h/hadoop-dist/target/*.zip 1> /dev/null 2>&1; then
+          cp /c/h/hadoop-dist/target/*.zip "$BUILD_DIR/"
         fi
         
         # Create build metadata
@@ -258,12 +279,17 @@ jobs:
           "build_type": "$BUILD_TYPE",
           "runner_os": "windows-latest",
           "workflow_run_id": "${{ github.run_id }}",
-          "workflow_run_number": "${{ github.run_number }}"
+          "workflow_run_number": "${{ github.run_number }}",
+          "path_workaround": "Used C:\\h short path to avoid Windows path limitations"
         }
         EOF
         
         # Create/update index
         echo "# Hadoop Windows Builds" > artifacts-repo/builds/windows/README.md
+        echo "" >> artifacts-repo/builds/windows/README.md
+        echo "## Build Notes" >> artifacts-repo/builds/windows/README.md
+        echo "- All builds use short path (C:\\h) to avoid Windows 260-character path limit" >> artifacts-repo/builds/windows/README.md
+        echo "- Long path support is enabled via Git configuration" >> artifacts-repo/builds/windows/README.md
         echo "" >> artifacts-repo/builds/windows/README.md
         echo "## Latest Builds" >> artifacts-repo/builds/windows/README.md
         echo "" >> artifacts-repo/builds/windows/README.md
@@ -292,8 +318,8 @@ jobs:
       with:
         name: hadoop-windows-build-${{ env.HADOOP_VERSION }}-${{ env.HADOOP_COMMIT }}
         path: |
-          hadoop-source/hadoop-dist/target/*.tar.gz
-          hadoop-source/hadoop-dist/target/*.zip
+          C:\h\hadoop-dist\target\*.tar.gz
+          C:\h\hadoop-dist\target\*.zip
         retention-days: 90
 
     - name: Upload Test Results
@@ -302,8 +328,8 @@ jobs:
       with:
         name: test-results-${{ env.HADOOP_VERSION }}-${{ env.HADOOP_COMMIT }}
         path: |
-          hadoop-source/**/target/surefire-reports/*.xml
-          hadoop-source/**/target/failsafe-reports/*.xml
+          C:\h\**\target\surefire-reports\*.xml
+          C:\h\**\target\failsafe-reports\*.xml
         retention-days: 30
 
     - name: Commit Artifacts to Repository
@@ -344,11 +370,12 @@ jobs:
         echo "- YARN UI v2: Yes" >> $GITHUB_STEP_SUMMARY
         echo "- Documentation: Skipped" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        if ls hadoop-source/hadoop-dist/target/*.tar.gz 1> /dev/null 2>&1; then
+        if ls /c/h/hadoop-dist/target/*.tar.gz 1> /dev/null 2>&1; then
           echo "### Artifacts Created" >> $GITHUB_STEP_SUMMARY
           echo "✅ Distribution tarball created successfully" >> $GITHUB_STEP_SUMMARY
           echo "📦 Available in: ${{ env.BUILD_DIR_NAME }}" >> $GITHUB_STEP_SUMMARY
           echo "🗂️ Committed to artifacts repository" >> $GITHUB_STEP_SUMMARY
+          echo "🛠️ Built using short path workaround (C:\\h)" >> $GITHUB_STEP_SUMMARY
         else
           echo "### Build Status" >> $GITHUB_STEP_SUMMARY
           echo "❌ Distribution tarball creation failed" >> $GITHUB_STEP_SUMMARY
