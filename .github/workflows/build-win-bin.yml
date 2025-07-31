@@ -197,48 +197,69 @@ jobs:
       run: |
         Write-Host "=== Getting Hadoop Version ==="
         
+        $version = $null
+        $ErrorActionPreference = 'Continue'
+        
+        # Try Maven first
         try {
-          # Use Maven to get version with better output handling
+          Write-Host "Attempting Maven version evaluation..."
           $versionOutput = mvn help:evaluate -Dexpression=project.version -q -DforceStdout -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn 2>$null
           
           # Extract just the version line (should be simple text, not XML)
-          $version = $versionOutput | Where-Object { $_ -match '^\d+\.\d+\.\d+' } | Select-Object -First 1
-          
-          # Fallback: try parsing from pom.xml directly
-          if ([string]::IsNullOrWhiteSpace($version) -or $version.Contains('<')) {
-            Write-Host "Maven evaluate failed, parsing pom.xml directly..."
-            
-            [xml]$pomContent = Get-Content "pom.xml"
-            $version = $pomContent.project.version
-            
-            if ([string]::IsNullOrWhiteSpace($version)) {
-              $version = $pomContent.project.parent.version
-            }
+          if ($versionOutput) {
+            $version = $versionOutput | Where-Object { $_ -match '^\d+\.\d+\.\d+' } | Select-Object -First 1
           }
-          
-          # Clean up the version string
-          $version = $version.Trim()
-          
-          if ([string]::IsNullOrWhiteSpace($version) -or $version.Contains('<')) {
-            throw "Could not determine Hadoop version. Got: $version"
-          }
-          
-          Write-Host "✅ Hadoop Version: $version"
-          echo "HADOOP_VERSION=$version" >> $env:GITHUB_ENV
-          
         } catch {
-          Write-Host "❌ Version detection failed: $($_.Exception.Message)"
-          # Set a fallback version based on branch name
-          $fallbackVersion = "unknown"
-          if ("${{ env.HADOOP_BRANCH }}" -match "branch-(\d+\.\d+)") {
-            $fallbackVersion = $matches[1] + ".0-SNAPSHOT"
-          } elseif ("${{ env.HADOOP_BRANCH }}" -eq "trunk") {
-            $fallbackVersion = "4.0.0-SNAPSHOT"
-          }
-          
-          Write-Host "⚠️ Using fallback version: $fallbackVersion"
-          echo "HADOOP_VERSION=$fallbackVersion" >> $env:GITHUB_ENV
+          Write-Host "Maven evaluate command failed: $($_.Exception.Message)"
         }
+        
+        # Fallback: parse pom.xml directly
+        if ([string]::IsNullOrWhiteSpace($version) -or $version.Contains('<')) {
+          Write-Host "Maven evaluate failed, parsing pom.xml directly..."
+          
+          try {
+            if (Test-Path "pom.xml") {
+              [xml]$pomContent = Get-Content "pom.xml" -ErrorAction Stop
+              $version = $pomContent.project.version
+              
+              if ([string]::IsNullOrWhiteSpace($version)) {
+                $version = $pomContent.project.parent.version
+              }
+            } else {
+              throw "pom.xml not found"
+            }
+          } catch {
+            Write-Host "Failed to parse pom.xml: $($_.Exception.Message)"
+          }
+        }
+        
+        # Final fallback based on branch name
+        if ([string]::IsNullOrWhiteSpace($version) -or $version.Contains('<')) {
+          Write-Host "Using branch-based fallback version..."
+          
+          $branchName = "${{ env.HADOOP_BRANCH }}"
+          if ($branchName -match "branch-(\d+\.\d+)") {
+            $version = $matches[1] + ".0-SNAPSHOT"
+          } elseif ($branchName -eq "trunk") {
+            $version = "4.0.0-SNAPSHOT"
+          } else {
+            $version = "unknown-SNAPSHOT"
+          }
+        }
+        
+        # Clean up and validate final version
+        $version = $version.Trim()
+        
+        if ([string]::IsNullOrWhiteSpace($version)) {
+          Write-Host "❌ Could not determine Hadoop version"
+          $version = "unknown-SNAPSHOT"
+        }
+        
+        Write-Host "✅ Hadoop Version: $version"
+        echo "HADOOP_VERSION=$version" >> $env:GITHUB_ENV
+        
+        # Ensure we exit successfully
+        exit 0
 
     - name: Set up Java
       uses: actions/setup-java@v4
