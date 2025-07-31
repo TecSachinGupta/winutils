@@ -2,7 +2,7 @@ name: Build Hadoop on Windows (Artifacts Repository)
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
@@ -198,11 +198,29 @@ jobs:
         Write-Host "=== Getting Hadoop Version ==="
         
         try {
-          # Use Maven to get version without building
-          $version = mvn help:evaluate -Dexpression=project.version -q -DforceStdout
+          # Use Maven to get version with better output handling
+          $versionOutput = mvn help:evaluate -Dexpression=project.version -q -DforceStdout -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn 2>$null
           
-          if ([string]::IsNullOrWhiteSpace($version)) {
-            throw "Could not determine Hadoop version"
+          # Extract just the version line (should be simple text, not XML)
+          $version = $versionOutput | Where-Object { $_ -match '^\d+\.\d+\.\d+' } | Select-Object -First 1
+          
+          # Fallback: try parsing from pom.xml directly
+          if ([string]::IsNullOrWhiteSpace($version) -or $version.Contains('<')) {
+            Write-Host "Maven evaluate failed, parsing pom.xml directly..."
+            
+            [xml]$pomContent = Get-Content "pom.xml"
+            $version = $pomContent.project.version
+            
+            if ([string]::IsNullOrWhiteSpace($version)) {
+              $version = $pomContent.project.parent.version
+            }
+          }
+          
+          # Clean up the version string
+          $version = $version.Trim()
+          
+          if ([string]::IsNullOrWhiteSpace($version) -or $version.Contains('<')) {
+            throw "Could not determine Hadoop version. Got: $version"
           }
           
           Write-Host "✅ Hadoop Version: $version"
@@ -210,7 +228,16 @@ jobs:
           
         } catch {
           Write-Host "❌ Version detection failed: $($_.Exception.Message)"
-          throw
+          # Set a fallback version based on branch name
+          $fallbackVersion = "unknown"
+          if ("${{ env.HADOOP_BRANCH }}" -match "branch-(\d+\.\d+)") {
+            $fallbackVersion = $matches[1] + ".0-SNAPSHOT"
+          } elseif ("${{ env.HADOOP_BRANCH }}" -eq "trunk") {
+            $fallbackVersion = "4.0.0-SNAPSHOT"
+          }
+          
+          Write-Host "⚠️ Using fallback version: $fallbackVersion"
+          echo "HADOOP_VERSION=$fallbackVersion" >> $env:GITHUB_ENV
         }
 
     - name: Set up Java
