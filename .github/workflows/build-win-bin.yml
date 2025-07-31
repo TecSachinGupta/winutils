@@ -28,7 +28,7 @@ on:
         required: false
         default: true
         type: boolean
-
+env:
   # Configuration for artifacts repository
   HADOOP_REPO: ${{ github.event.inputs.hadoop_repo || 'https://github.com/apache/hadoop.git' }}
   HADOOP_BRANCH: ${{ github.event.inputs.hadoop_branch || 'trunk' }}
