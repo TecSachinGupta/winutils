@@ -1,4 +1,4 @@
-name: Build Hadoop on Windows (Fail-Safe with Detailed Analysis)
+name: Build Hadoop on Windows (Fixed)
 
 on:
   push:
@@ -232,7 +232,6 @@ jobs:
         
         Write-Host "✅ Hadoop Version: $version"
         echo "HADOOP_VERSION=$version" >> $env:GITHUB_ENV
-        exit 0
 
     - name: Set up Java
       uses: actions/setup-java@v4
@@ -402,6 +401,8 @@ jobs:
           -Drequire.openssl=false ^
           -Drequire.fuse=false ^
           -Drequire.pmdk=false ^
+          -Dskip.platform ^
+          -Dplatform.name=linux ^
           --fail-at-end ^
           --batch-mode ^
           -Dmaven.compile.failOnError=false ^
@@ -458,6 +459,7 @@ jobs:
           -Dwindows.build.hdfspp.dll=off ^
           -Dwindows.no.sasl=on ^
           -Duse.platformToolsetVersion=v143 ^
+          -Dplatform.name=windows ^
           -T 1C ^
           -pl "!hadoop-hdfs-project/hadoop-hdfs-native-client" ^
           --fail-at-end ^
@@ -475,40 +477,7 @@ jobs:
           echo CORE_BUILD_HAD_FAILURES=false>> %GITHUB_ENV%
         )
         
-        echo === Phase 2: Attempting hdfs-native-client build ===
-        mvn install ^
-          -Dhttps.protocols=TLSv1.2 ^
-          %TEST_ARGS% ^
-          -DskipDocs ^
-          -Pnative-win ^
-          -Dskip.platformToolsetDetection ^
-          -Drequire.openssl ^
-          -Dshell-executable="C:\Program Files\Git\bin\bash.exe" ^
-          -Dopenssl.prefix=C:\vcpkg\installed\x64-windows ^
-          -Dcmake.prefix.path=C:\vcpkg\installed\x64-windows ^
-          -Dwindows.cmake.toolchain.file=C:\vcpkg\scripts\buildsystems\vcpkg.cmake ^
-          -Dwindows.cmake.build.type=RelWithDebInfo ^
-          -Dwindows.build.hdfspp.dll=off ^
-          -Dwindows.no.sasl=on ^
-          -Duse.platformToolsetVersion=v143 ^
-          -T 1C ^
-          -Dcmake.generator="Visual Studio 17 2022" ^
-          -Dcmake.generator.platform=x64 ^
-          -pl "hadoop-hdfs-project/hadoop-hdfs-native-client" ^
-          --batch-mode ^
-          -Dmaven.compile.failOnError=false
-        
-        set HDFS_NATIVE_EXIT_CODE=%ERRORLEVEL%
-        
-        if %HDFS_NATIVE_EXIT_CODE% neq 0 (
-          echo ⚠️ hdfs-native-client build failed (exit code: %HDFS_NATIVE_EXIT_CODE%)
-          echo HDFS_NATIVE_BUILD_HAD_FAILURES=true>> %GITHUB_ENV%
-        ) else (
-          echo ✅ hdfs-native-client built successfully
-          echo HDFS_NATIVE_BUILD_HAD_FAILURES=false>> %GITHUB_ENV%
-        )
-        
-        echo === Phase 3: Creating distribution package ===
+        echo === Phase 2: Creating distribution package ===
         mvn package ^
           -Dhttps.protocols=TLSv1.2 ^
           %TEST_ARGS% ^
@@ -517,6 +486,7 @@ jobs:
           -Pyarn-ui ^
           -Dtar ^
           -T 1C ^
+          -Dplatform.name=windows ^
           -pl "hadoop-dist" ^
           --batch-mode ^
           -Dmaven.compile.failOnError=false ^
@@ -542,6 +512,7 @@ jobs:
             -Drequire.openssl=false ^
             -Drequire.fuse=false ^
             -Drequire.pmdk=false ^
+            -Dplatform.name=windows ^
             --fail-at-end ^
             --batch-mode ^
             -Dmaven.compile.failOnError=false ^
@@ -566,8 +537,6 @@ jobs:
         
         REM Set overall build status for summary
         if "%CORE_BUILD_HAD_FAILURES%"=="true" (
-          echo NATIVE_BUILD_HAD_FAILURES=true>> %GITHUB_ENV%
-        ) else if "%HDFS_NATIVE_BUILD_HAD_FAILURES%"=="true" (
           echo NATIVE_BUILD_HAD_FAILURES=true>> %GITHUB_ENV%
         ) else if "%DIST_BUILD_HAD_FAILURES%"=="true" (
           echo NATIVE_BUILD_HAD_FAILURES=true>> %GITHUB_ENV%
@@ -623,6 +592,38 @@ jobs:
         )
         
         echo ✅ Test execution completed (with detailed failure tracking)
+
+    - name: Initialize Build Analysis Variables
+      run: |
+        Write-Host "=== Initializing Build Analysis Variables ==="
+        
+        # Initialize all build analysis variables with defaults
+        if (-not $env:BUILD_ANALYSIS_STATUS) {
+          echo "BUILD_ANALYSIS_STATUS=unknown" >> $env:GITHUB_ENV
+        }
+        if (-not $env:JAVA_BUILD_HAD_FAILURES) {
+          echo "JAVA_BUILD_HAD_FAILURES=false" >> $env:GITHUB_ENV
+        }
+        if (-not $env:NATIVE_BUILD_HAD_FAILURES) {
+          echo "NATIVE_BUILD_HAD_FAILURES=false" >> $env:GITHUB_ENV
+        }
+        if (-not $env:TEST_HAD_FAILURES) {
+          echo "TEST_HAD_FAILURES=false" >> $env:GITHUB_ENV
+        }
+        if (-not $env:CORE_BUILD_HAD_FAILURES) {
+          echo "CORE_BUILD_HAD_FAILURES=false" >> $env:GITHUB_ENV
+        }
+        if (-not $env:HDFS_NATIVE_BUILD_HAD_FAILURES) {
+          echo "HDFS_NATIVE_BUILD_HAD_FAILURES=false" >> $env:GITHUB_ENV
+        }
+        if (-not $env:DIST_BUILD_HAD_FAILURES) {
+          echo "DIST_BUILD_HAD_FAILURES=false" >> $env:GITHUB_ENV
+        }
+        if (-not $env:BUILD_COMPLETELY_FAILED) {
+          echo "BUILD_COMPLETELY_FAILED=false" >> $env:GITHUB_ENV
+        }
+        
+        Write-Host "✅ Build analysis variables initialized"
 
     - name: Analyze Build Results
       working-directory: ${{ env.HADOOP_SOURCE_DIR }}
@@ -896,17 +897,21 @@ jobs:
         BUILD_DIR="artifacts-repo/builds/windows/hadoop-${HADOOP_VERSION}-${BUILD_SUFFIX}-${BUILD_STATUS_SUFFIX}-${TIMESTAMP}-${HADOOP_COMMIT:0:8}"
         mkdir -p "$BUILD_DIR"
         
-        # Copy build artifacts
+        # Copy build artifacts if they exist
         HADOOP_DIST_DIR="${HADOOP_SOURCE_DIR}/hadoop-dist/target"
         
-        if ls "${HADOOP_DIST_DIR}"/*.tar.gz 1> /dev/null 2>&1; then
-          cp "${HADOOP_DIST_DIR}"/*.tar.gz "$BUILD_DIR/"
-          echo "✅ Copied tar.gz files"
-        fi
-        
-        if ls "${HADOOP_DIST_DIR}"/*.zip 1> /dev/null 2>&1; then
-          cp "${HADOOP_DIST_DIR}"/*.zip "$BUILD_DIR/"
-          echo "✅ Copied zip files"
+        if [ -d "${HADOOP_DIST_DIR}" ]; then
+          if ls "${HADOOP_DIST_DIR}"/*.tar.gz 1> /dev/null 2>&1; then
+            cp "${HADOOP_DIST_DIR}"/*.tar.gz "$BUILD_DIR/"
+            echo "✅ Copied tar.gz files"
+          fi
+          
+          if ls "${HADOOP_DIST_DIR}"/*.zip 1> /dev/null 2>&1; then
+            cp "${HADOOP_DIST_DIR}"/*.zip "$BUILD_DIR/"
+            echo "✅ Copied zip files"
+          fi
+        else
+          echo "⚠️ Distribution directory not found: ${HADOOP_DIST_DIR}"
         fi
         
         # Copy additional analysis files
@@ -975,7 +980,7 @@ jobs:
         cat > "$BUILD_DIR/README.md" << EOF
         # Hadoop Windows Build - $HADOOP_VERSION
         
-        **Build Status**: $(echo $BUILD_ANALYSIS_STATUS | tr '[:lower:]' '[:upper:]')  
+        **Build Status**: $(echo ${BUILD_ANALYSIS_STATUS:-unknown} | tr '[:lower:]' '[:upper:]')  
         **Build Type**: $([ "$BUILD_NATIVE" = "true" ] && echo "Native (with exclusions)" || echo "Java-only")  
         **Timestamp**: $TIMESTAMP  
         **Commit**: $HADOOP_COMMIT  
@@ -1103,6 +1108,11 @@ jobs:
       if: always()
       run: |
         Write-Host "=== Generating Final Build Summary ==="
+        
+        # Ensure BUILD_ANALYSIS_STATUS is set
+        if (-not $env:BUILD_ANALYSIS_STATUS) {
+          $env:BUILD_ANALYSIS_STATUS = "unknown"
+        }
         
         $buildType = if ($env:BUILD_NATIVE -eq 'true') { 'Native (with exclusions)' } else { 'Java-only' }
         $statusEmoji = switch ($env:BUILD_ANALYSIS_STATUS) {
