@@ -1,0 +1,686 @@
+name: Multi-Version Hadoop Build Pipeline
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  schedule:
+    # Run weekly on Sundays at 2 AM UTC
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: 'Hadoop versions to build (comma-separated, e.g., "3.3.6,3.4.0,trunk")'
+        required: false
+        default: '3.3.6,3.4.0'
+      platforms:
+        description: 'Platforms to build on (comma-separated: windows,ubuntu,macos)'
+        required: false
+        default: 'ubuntu,windows'
+        type: choice
+        options:
+          - 'ubuntu'
+          - 'windows'
+          - 'macos'
+          - 'ubuntu,windows'
+          - 'ubuntu,macos'
+          - 'windows,macos'
+          - 'ubuntu,windows,macos'
+      java_versions:
+        description: 'Java versions (comma-separated, e.g., "8,11,17")'
+        required: false
+        default: '11'
+      hadoop_repo:
+        description: 'Hadoop repository URL'
+        required: false
+        default: 'https://github.com/apache/hadoop.git'
+      build_native:
+        description: 'Build native components'
+        required: false
+        default: false
+        type: boolean
+      skip_tests:
+        description: 'Skip tests during build'
+        required: false
+        default: true
+        type: boolean
+      parallel_jobs:
+        description: 'Maximum parallel jobs'
+        required: false
+        default: '6'
+        type: choice
+        options:
+          - '2'
+          - '4'
+          - '6'
+          - '8'
+          - '10'
+
+env:
+  # Default configurations
+  DEFAULT_VERSIONS: '3.3.6,3.4.0'
+  DEFAULT_PLATFORMS: 'ubuntu,windows'
+  DEFAULT_JAVA_VERSIONS: '11'
+  DEFAULT_REPO: 'https://github.com/apache/hadoop.git'
+  
+  # Build optimization
+  MAVEN_OPTS: '-Xmx4096M -Xss512M -XX:MaxMetaspaceSize=512M'
+  MAVEN_CLI_OPTS: '--batch-mode --no-transfer-progress'
+
+jobs:
+  # Job to parse inputs and create build matrix
+  prepare-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      total-jobs: ${{ steps.matrix.outputs.total-jobs }}
+    steps:
+    - name: Generate Build Matrix
+      id: matrix
+      run: |
+        set -e
+        
+        # Parse input parameters or use defaults
+        VERSIONS="${{ github.event.inputs.versions || env.DEFAULT_VERSIONS }}"
+        PLATFORMS="${{ github.event.inputs.platforms || env.DEFAULT_PLATFORMS }}"
+        JAVA_VERSIONS="${{ github.event.inputs.java_versions || env.DEFAULT_JAVA_VERSIONS }}"
+        REPO="${{ github.event.inputs.hadoop_repo || env.DEFAULT_REPO }}"
+        BUILD_NATIVE="${{ github.event.inputs.build_native || 'false' }}"
+        SKIP_TESTS="${{ github.event.inputs.skip_tests || 'true' }}"
+        
+        echo "Input Parameters:"
+        echo "Versions: $VERSIONS"
+        echo "Platforms: $PLATFORMS"
+        echo "Java Versions: $JAVA_VERSIONS"
+        echo "Repository: $REPO"
+        echo "Build Native: $BUILD_NATIVE"
+        echo "Skip Tests: $SKIP_TESTS"
+        
+        # Function to convert version to branch/tag
+        version_to_branch() {
+          local version="$1"
+          case "$version" in
+            trunk|master) echo "trunk" ;;
+            *-SNAPSHOT) echo "trunk" ;;
+            3.0.*) echo "branch-3.0" ;;
+            3.1.*) echo "branch-3.1" ;;
+            3.2.*) echo "branch-3.2" ;;
+            3.3.*) echo "branch-3.3" ;;
+            3.4.*) echo "branch-3.4" ;;
+            *) echo "rel/release-$version" ;;
+          esac
+        }
+        
+        # Function to get runner for platform
+        get_runner() {
+          local platform="$1"
+          case "$platform" in
+            ubuntu) echo "ubuntu-latest" ;;
+            windows) echo "windows-latest" ;;
+            macos) echo "macos-latest" ;;
+            *) echo "ubuntu-latest" ;;
+          esac
+        }
+        
+        # Function to determine if native build should be attempted
+        should_build_native() {
+          local platform="$1"
+          local version="$2"
+          local build_native="$3"
+          
+          if [[ "$build_native" == "false" ]]; then
+            echo "false"
+            return
+          fi
+          
+          # Native builds are more reliable on Linux
+          if [[ "$platform" == "ubuntu" ]]; then
+            echo "true"
+          elif [[ "$platform" == "macos" ]]; then
+            echo "true"
+          else
+            # Windows native builds are challenging, especially for newer versions
+            case "$version" in
+              3.5.*|*-SNAPSHOT|trunk) echo "false" ;;
+              *) echo "auto" ;;
+            esac
+          fi
+        }
+        
+        # Generate matrix
+        matrix_json="["
+        total_jobs=0
+        
+        IFS=',' read -ra VERSION_ARRAY <<< "$VERSIONS"
+        IFS=',' read -ra PLATFORM_ARRAY <<< "$PLATFORMS"
+        IFS=',' read -ra JAVA_ARRAY <<< "$JAVA_VERSIONS"
+        
+        for version in "${VERSION_ARRAY[@]}"; do
+          version=$(echo "$version" | xargs) # trim whitespace
+          branch=$(version_to_branch "$version")
+          
+          for platform in "${PLATFORM_ARRAY[@]}"; do
+            platform=$(echo "$platform" | xargs)
+            runner=$(get_runner "$platform")
+            
+            for java_version in "${JAVA_ARRAY[@]}"; do
+              java_version=$(echo "$java_version" | xargs)
+              native_build=$(should_build_native "$platform" "$version" "$BUILD_NATIVE")
+              
+              # Add comma if not first entry
+              if [[ $total_jobs -gt 0 ]]; then
+                matrix_json+=","
+              fi
+              
+              # Create matrix entry
+              matrix_json+="{
+                \"version\": \"$version\",
+                \"branch\": \"$branch\",
+                \"platform\": \"$platform\",
+                \"runner\": \"$runner\",
+                \"java_version\": \"$java_version\",
+                \"repository\": \"$REPO\",
+                \"build_native\": \"$native_build\",
+                \"skip_tests\": \"$SKIP_TESTS\"
+              }"
+              
+              ((total_jobs++))
+            done
+          done
+        done
+        
+        matrix_json+="]"
+        
+        echo "Generated matrix with $total_jobs jobs:"
+        echo "$matrix_json" | jq '.'
+        
+        # Output for GitHub
+        echo "matrix={\"include\":$matrix_json}" >> $GITHUB_OUTPUT
+        echo "total-jobs=$total_jobs" >> $GITHUB_OUTPUT
+
+  # Validation job to check inputs and repository access
+  validate-inputs:
+    runs-on: ubuntu-latest
+    needs: prepare-matrix
+    steps:
+    - name: Validate Configuration
+      run: |
+        set -e
+        
+        echo "=== Validating Build Configuration ==="
+        echo "Total jobs to run: ${{ needs.prepare-matrix.outputs.total-jobs }}"
+        
+        # Validate repository access
+        REPO="${{ github.event.inputs.hadoop_repo || env.DEFAULT_REPO }}"
+        echo "Validating repository access: $REPO"
+        
+        if ! git ls-remote --heads "$REPO" > /dev/null 2>&1; then
+          echo "❌ Cannot access repository: $REPO"
+          exit 1
+        fi
+        
+        echo "✅ Repository access validated"
+        
+        # Check if we're within reasonable job limits
+        MAX_JOBS="${{ github.event.inputs.parallel_jobs || '6' }}"
+        TOTAL_JOBS="${{ needs.prepare-matrix.outputs.total-jobs }}"
+        
+        if [[ $TOTAL_JOBS -gt $MAX_JOBS ]]; then
+          echo "⚠️ Warning: $TOTAL_JOBS jobs requested, but limit is $MAX_JOBS"
+          echo "Consider reducing the number of versions/platforms/Java versions"
+        fi
+        
+        echo "✅ Configuration validation completed"
+
+  # Main build job with matrix strategy
+  build-hadoop:
+    runs-on: ${{ matrix.runner }}
+    needs: [prepare-matrix, validate-inputs]
+    if: needs.prepare-matrix.outputs.total-jobs > 0
+    timeout-minutes: 240
+    
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJson(github.event.inputs.parallel_jobs || '6') }}
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+    
+    env:
+      HADOOP_VERSION: ${{ matrix.version }}
+      HADOOP_BRANCH: ${{ matrix.branch }}
+      HADOOP_REPO: ${{ matrix.repository }}
+      JAVA_VERSION: ${{ matrix.java_version }}
+      BUILD_NATIVE: ${{ matrix.build_native }}
+      SKIP_TESTS: ${{ matrix.skip_tests }}
+      PLATFORM: ${{ matrix.platform }}
+      BUILD_DIR: ${{ runner.temp }}/hadoop-${{ matrix.version }}-${{ matrix.platform }}-java${{ matrix.java_version }}
+    
+    steps:
+    - name: Setup Build Environment
+      shell: bash
+      run: |
+        echo "=== Setting up Build Environment ==="
+        echo "Platform: ${{ matrix.platform }}"
+        echo "Runner: ${{ matrix.runner }}"
+        echo "Hadoop Version: ${{ matrix.version }}"
+        echo "Branch: ${{ matrix.branch }}"
+        echo "Java Version: ${{ matrix.java_version }}"
+        echo "Build Native: ${{ matrix.build_native }}"
+        echo "Skip Tests: ${{ matrix.skip_tests }}"
+        echo "Build Directory: $BUILD_DIR"
+        
+        # Create build directory
+        mkdir -p "$BUILD_DIR"
+        echo "BUILD_DIR=$BUILD_DIR" >> $GITHUB_ENV
+        
+        # Set platform-specific configurations
+        case "${{ matrix.platform }}" in
+          windows)
+            echo "IS_WINDOWS=true" >> $GITHUB_ENV
+            echo "MAVEN_OPTS=-Xmx4096M -Xss512M -XX:MaxMetaspaceSize=512M" >> $GITHUB_ENV
+            ;;
+          macos)
+            echo "IS_MACOS=true" >> $GITHUB_ENV
+            echo "MAVEN_OPTS=-Xmx6144M -Xss512M -XX:MaxMetaspaceSize=512M" >> $GITHUB_ENV
+            ;;
+          ubuntu)
+            echo "IS_LINUX=true" >> $GITHUB_ENV
+            echo "MAVEN_OPTS=-Xmx8192M -Xss512M -XX:MaxMetaspaceSize=512M" >> $GITHUB_ENV
+            ;;
+        esac
+
+    - name: Configure Git (Windows)
+      if: matrix.platform == 'windows'
+      shell: bash
+      run: |
+        git config --global core.longpaths true
+        git config --global core.autocrlf false
+        git config --global core.preloadindex true
+        git config --global core.fscache true
+
+    - name: Set up Java
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ matrix.java_version }}
+        distribution: 'temurin'
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install Platform Dependencies (Ubuntu)
+      if: matrix.platform == 'ubuntu'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake pkg-config
+        
+        # Install optional native dependencies if building native
+        if [[ "${{ matrix.build_native }}" == "true" ]]; then
+          sudo apt-get install -y libssl-dev libsnappy-dev libbz2-dev libzstd-dev liblz4-dev
+        fi
+
+    - name: Install Platform Dependencies (macOS)
+      if: matrix.platform == 'macos'
+      run: |
+        brew install cmake pkg-config
+        
+        # Install optional native dependencies if building native
+        if [[ "${{ matrix.build_native }}" == "true" ]]; then
+          brew install openssl snappy zstd lz4
+        fi
+
+    - name: Add Git Unix Tools to PATH (Windows)
+      if: matrix.platform == 'windows'
+      shell: bash
+      run: |
+        echo "C:/Program Files/Git/bin" >> $GITHUB_PATH
+        echo "C:/Program Files/Git/usr/bin" >> $GITHUB_PATH
+
+    - name: Clone Hadoop Repository
+      shell: bash
+      run: |
+        echo "=== Cloning Hadoop Repository ==="
+        echo "Repository: $HADOOP_REPO"
+        echo "Branch: $HADOOP_BRANCH"
+        echo "Target: $BUILD_DIR"
+        
+        # Clone with shallow depth for efficiency
+        git clone --depth 10 --branch "$HADOOP_BRANCH" "$HADOOP_REPO" "$BUILD_DIR"
+        cd "$BUILD_DIR"
+        
+        # Get commit info
+        COMMIT=$(git rev-parse HEAD)
+        echo "HADOOP_COMMIT=$COMMIT" >> $GITHUB_ENV
+        
+        echo "✅ Repository cloned successfully"
+        echo "Commit: $COMMIT"
+
+    - name: Detect Hadoop Version
+      shell: bash
+      working-directory: ${{ env.BUILD_DIR }}
+      run: |
+        echo "=== Detecting Hadoop Version ==="
+        
+        VERSION=""
+        
+        # Try Maven first
+        if command -v mvn >/dev/null 2>&1; then
+          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        fi
+        
+        # Fallback to pom.xml parsing
+        if [[ -z "$VERSION" && -f pom.xml ]]; then
+          VERSION=$(grep -E '<version>[0-9]+\.[0-9]+\.[0-9]+' pom.xml | head -1 | sed 's/.*<version>\([^<]*\)<\/version>.*/\1/')
+        fi
+        
+        # Final fallback based on matrix version
+        if [[ -z "$VERSION" ]]; then
+          VERSION="${{ matrix.version }}"
+        fi
+        
+        echo "DETECTED_HADOOP_VERSION=$VERSION" >> $GITHUB_ENV
+        echo "✅ Detected Hadoop Version: $VERSION"
+
+    - name: Cache Maven Dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.m2/repository
+        key: ${{ runner.os }}-maven-java${{ matrix.java_version }}-hadoop-${{ env.DETECTED_HADOOP_VERSION }}-${{ hashFiles('**/pom.xml') }}
+        restore-keys: |
+          ${{ runner.os }}-maven-java${{ matrix.java_version }}-hadoop-${{ env.DETECTED_HADOOP_VERSION }}-
+          ${{ runner.os }}-maven-java${{ matrix.java_version }}-hadoop-
+          ${{ runner.os }}-maven-java${{ matrix.java_version }}-
+          ${{ runner.os }}-maven-
+
+    - name: Build Hadoop
+      shell: bash
+      working-directory: ${{ env.BUILD_DIR }}
+      run: |
+        echo "=== Building Hadoop ${{ env.DETECTED_HADOOP_VERSION }} ==="
+        
+        # Set build flags based on platform and configuration
+        BUILD_FLAGS=()
+        BUILD_FLAGS+=("clean" "package")
+        BUILD_FLAGS+=("-Dhttps.protocols=TLSv1.2")
+        BUILD_FLAGS+=("$MAVEN_CLI_OPTS")
+        BUILD_FLAGS+=("-Pdist")
+        BUILD_FLAGS+=("-Dtar")
+        
+        # Test configuration
+        if [[ "$SKIP_TESTS" == "true" ]]; then
+          BUILD_FLAGS+=("-DskipTests")
+        fi
+        
+        # Native build configuration
+        case "$BUILD_NATIVE" in
+          true)
+            echo "🔧 Enabling native build"
+            BUILD_FLAGS+=("-Pnative")
+            ;;
+          false)
+            echo "🔧 Disabling native build"
+            BUILD_FLAGS+=("-Dnative=false")
+            BUILD_FLAGS+=("-Drequire.libhadoop=false")
+            BUILD_FLAGS+=("-Drequire.snappy=false")
+            BUILD_FLAGS+=("-Drequire.openssl=false")
+            ;;
+          auto)
+            echo "🔧 Auto-detecting native capabilities"
+            # Let Maven decide based on available tools
+            ;;
+        esac
+        
+        # Platform-specific configurations
+        case "${{ matrix.platform }}" in
+          windows)
+            BUILD_FLAGS+=("-Dwindows")
+            BUILD_FLAGS+=("-Dplatform.name=generic")
+            BUILD_FLAGS+=("-Duse.platformToolsetVersion=v143")
+            BUILD_FLAGS+=("-Dhadoop.skip.shaded.check=true")
+            BUILD_FLAGS+=("-Denforcer.skip=true")
+            
+            # Skip problematic modules on Windows
+            BUILD_FLAGS+=("-pl" "!hadoop-hdfs-project/hadoop-hdfs-native-client")
+            BUILD_FLAGS+=("-pl" "!hadoop-yarn-project/hadoop-yarn-applications/hadoop-yarn-applications-mawo")
+            ;;
+          macos)
+            BUILD_FLAGS+=("-Dplatform.name=Darwin")
+            ;;
+          ubuntu)
+            BUILD_FLAGS+=("-Dplatform.name=Linux")
+            ;;
+        esac
+        
+        # Memory and performance optimizations
+        BUILD_FLAGS+=("-T" "1C")
+        BUILD_FLAGS+=("-Dmaven.compile.failOnError=false")
+        BUILD_FLAGS+=("-Dmaven.javadoc.skip=true")
+        BUILD_FLAGS+=("--fail-at-end")
+        
+        echo "Build command: mvn ${BUILD_FLAGS[*]}"
+        
+        # Execute build
+        set +e
+        mvn "${BUILD_FLAGS[@]}"
+        BUILD_EXIT_CODE=$?
+        set -e
+        
+        # Analyze build result
+        if [[ $BUILD_EXIT_CODE -eq 0 ]]; then
+          echo "BUILD_STATUS=success" >> $GITHUB_ENV
+          echo "✅ Build completed successfully"
+        else
+          echo "BUILD_STATUS=failed" >> $GITHUB_ENV
+          echo "❌ Build failed with exit code: $BUILD_EXIT_CODE"
+          
+          # For Windows, try a minimal build
+          if [[ "${{ matrix.platform }}" == "windows" ]]; then
+            echo "🔄 Attempting minimal Windows build..."
+            set +e
+            mvn package -DskipTests -Pdist -Dtar -Dnative=false --fail-never
+            MINIMAL_EXIT_CODE=$?
+            set -e
+            
+            if [[ $MINIMAL_EXIT_CODE -eq 0 ]]; then
+              echo "BUILD_STATUS=partial_success" >> $GITHUB_ENV
+              echo "⚠️ Minimal build succeeded"
+            fi
+          fi
+        fi
+
+    - name: Run Tests
+      if: env.SKIP_TESTS == 'false'
+      shell: bash
+      working-directory: ${{ env.BUILD_DIR }}
+      run: |
+        echo "=== Running Hadoop Tests ==="
+        
+        # Run a subset of tests based on platform
+        TEST_FLAGS=()
+        TEST_FLAGS+=("test")
+        TEST_FLAGS+=("$MAVEN_CLI_OPTS")
+        TEST_FLAGS+=("-Dmaven.test.failure.ignore=true")
+        
+        case "${{ matrix.platform }}" in
+          windows)
+            # Run Windows-specific tests
+            TEST_FLAGS+=("-Dtest=**/TestWinUtils.java,**/TestWindowsBasedProcessTree.java")
+            ;;
+          *)
+            # Run core tests
+            TEST_FLAGS+=("-Dtest=**/TestFileUtil.java,**/TestConfiguration.java")
+            ;;
+        esac
+        
+        set +e
+        mvn "${TEST_FLAGS[@]}"
+        TEST_EXIT_CODE=$?
+        set -e
+        
+        if [[ $TEST_EXIT_CODE -eq 0 ]]; then
+          echo "TEST_STATUS=passed" >> $GITHUB_ENV
+          echo "✅ Tests passed"
+        else
+          echo "TEST_STATUS=failed" >> $GITHUB_ENV
+          echo "⚠️ Some tests failed (exit code: $TEST_EXIT_CODE)"
+        fi
+
+    - name: Analyze Build Artifacts
+      shell: bash
+      working-directory: ${{ env.BUILD_DIR }}
+      run: |
+        echo "=== Analyzing Build Artifacts ==="
+        
+        ARTIFACTS_FOUND=false
+        NATIVE_LIBS_FOUND=false
+        
+        # Look for distribution artifacts
+        if [[ -d "hadoop-dist/target" ]]; then
+          DIST_FILES=$(find hadoop-dist/target -name "*.tar.gz" -o -name "*.zip" 2>/dev/null || true)
+          if [[ -n "$DIST_FILES" ]]; then
+            ARTIFACTS_FOUND=true
+            echo "📦 Distribution artifacts found:"
+            echo "$DIST_FILES" | while read -r file; do
+              if [[ -f "$file" ]]; then
+                SIZE=$(du -h "$file" | cut -f1)
+                echo "  - $(basename "$file") ($SIZE)"
+              fi
+            done
+          fi
+        fi
+        
+        # Check for native libraries
+        NATIVE_FILES=$(find . -name "*.so" -o -name "*.dll" -o -name "*.dylib" 2>/dev/null || true)
+        if [[ -n "$NATIVE_FILES" ]]; then
+          NATIVE_LIBS_FOUND=true
+          echo "🔧 Native libraries found:"
+          echo "$NATIVE_FILES" | head -5 | while read -r file; do
+            echo "  - $file"
+          done
+        fi
+        
+        echo "ARTIFACTS_FOUND=$ARTIFACTS_FOUND" >> $GITHUB_ENV
+        echo "NATIVE_LIBS_FOUND=$NATIVE_LIBS_FOUND" >> $GITHUB_ENV
+        
+        echo "✅ Artifact analysis completed"
+
+    - name: Generate Build Report
+      shell: bash
+      working-directory: ${{ env.BUILD_DIR }}
+      run: |
+        echo "=== Generating Build Report ==="
+        
+        BUILD_STATUS="${BUILD_STATUS:-unknown}"
+        TEST_STATUS="${TEST_STATUS:-skipped}"
+        
+        cat > build-report.md << EOF
+        # Hadoop Build Report
+        
+        **Version**: ${{ env.DETECTED_HADOOP_VERSION }}
+        **Platform**: ${{ matrix.platform }}
+        **Java Version**: ${{ matrix.java_version }}
+        **Build Status**: $BUILD_STATUS
+        **Test Status**: $TEST_STATUS
+        **Timestamp**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+        
+        ## Configuration
+        - **Repository**: ${{ matrix.repository }}
+        - **Branch**: ${{ matrix.branch }}
+        - **Commit**: ${{ env.HADOOP_COMMIT }}
+        - **Native Build**: ${{ matrix.build_native }}
+        - **Skip Tests**: ${{ matrix.skip_tests }}
+        
+        ## Results
+        - **Build**: $(if [[ "$BUILD_STATUS" == "success" ]]; then echo "✅ SUCCESS"; elif [[ "$BUILD_STATUS" == "partial_success" ]]; then echo "⚠️ PARTIAL SUCCESS"; else echo "❌ FAILED"; fi)
+        - **Tests**: $(if [[ "$TEST_STATUS" == "passed" ]]; then echo "✅ PASSED"; elif [[ "$TEST_STATUS" == "failed" ]]; then echo "⚠️ SOME FAILED"; else echo "⏭️ SKIPPED"; fi)
+        - **Artifacts**: $(if [[ "$ARTIFACTS_FOUND" == "true" ]]; then echo "✅ CREATED"; else echo "❌ MISSING"; fi)
+        - **Native Libs**: $(if [[ "$NATIVE_LIBS_FOUND" == "true" ]]; then echo "✅ PRESENT"; else echo "❌ NOT FOUND"; fi)
+        
+        ## Platform Notes
+        $(case "${{ matrix.platform }}" in
+          windows) echo "- Windows builds may have limited native library support" ;;
+          macos) echo "- macOS builds require Xcode command line tools" ;;
+          ubuntu) echo "- Linux builds have the best native library support" ;;
+        esac)
+        
+        ## Next Steps
+        $(if [[ "$BUILD_STATUS" == "success" ]]; then
+          echo "1. Download and extract the distribution artifacts"
+          echo "2. Configure HADOOP_HOME and PATH variables"
+          echo "3. Test the installation in your target environment"
+        elif [[ "$BUILD_STATUS" == "partial_success" ]]; then
+          echo "1. Review build logs for specific module failures"
+          echo "2. Consider using available artifacts for development"
+          echo "3. Report any critical issues to the Hadoop community"
+        else
+          echo "1. Review detailed build logs for error analysis"
+          echo "2. Check system requirements and dependencies"
+          echo "3. Consider building on a different platform"
+        fi)
+        EOF
+        
+        echo "✅ Build report generated"
+
+    - name: Upload Build Artifacts
+      uses: actions/upload-artifact@v4
+      if: env.ARTIFACTS_FOUND == 'true'
+      with:
+        name: hadoop-${{ env.DETECTED_HADOOP_VERSION }}-${{ matrix.platform }}-java${{ matrix.java_version }}-${{ env.BUILD_STATUS }}
+        path: |
+          ${{ env.BUILD_DIR }}/hadoop-dist/target/*.tar.gz
+          ${{ env.BUILD_DIR }}/hadoop-dist/target/*.zip
+          ${{ env.BUILD_DIR }}/build-report.md
+        retention-days: 30
+
+    - name: Upload Build Logs
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: logs-hadoop-${{ env.DETECTED_HADOOP_VERSION }}-${{ matrix.platform }}-java${{ matrix.java_version }}
+        path: |
+          ${{ env.BUILD_DIR }}/**/target/surefire-reports/
+          ${{ env.BUILD_DIR }}/**/target/failsafe-reports/
+          ${{ env.BUILD_DIR }}/build-report.md
+        retention-days: 7
+        if-no-files-found: ignore
+
+  # Summary job to collect results from all builds
+  build-summary:
+    runs-on: ubuntu-latest
+    needs: [prepare-matrix, build-hadoop]
+    if: always()
+    
+    steps:
+    - name: Generate Overall Summary
+      run: |
+        echo "=== Multi-Version Hadoop Build Summary ===" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Total Jobs**: ${{ needs.prepare-matrix.outputs.total-jobs }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Trigger**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Timestamp**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Add configuration details
+        echo "### Configuration" >> $GITHUB_STEP_SUMMARY
+        echo "- **Versions**: ${{ github.event.inputs.versions || env.DEFAULT_VERSIONS }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Platforms**: ${{ github.event.inputs.platforms || env.DEFAULT_PLATFORMS }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Java Versions**: ${{ github.event.inputs.java_versions || env.DEFAULT_JAVA_VERSIONS }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Build Native**: ${{ github.event.inputs.build_native || 'false' }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Skip Tests**: ${{ github.event.inputs.skip_tests || 'true' }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Build results will be populated by the matrix results
+        echo "### Build Results" >> $GITHUB_STEP_SUMMARY
+        echo "Check individual job results for detailed status information." >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        echo "### Artifacts" >> $GITHUB_STEP_SUMMARY
+        echo "Successful builds will have their distribution packages available in the Actions artifacts section." >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+        echo "1. **Download artifacts** from successful builds" >> $GITHUB_STEP_SUMMARY
+        echo "2. **Review build reports** for platform-specific notes" >> $GITHUB_STEP_SUMMARY
+        echo "3. **Test installations** in your target environments" >> $GITHUB_STEP_SUMMARY
+        echo "4. **Report issues** to the Hadoop community if needed" >> $GITHUB_STEP_SUMMARY
