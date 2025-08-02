@@ -253,7 +253,7 @@ jobs:
       BUILD_NATIVE: ${{ matrix.build_native }}
       SKIP_TESTS: ${{ matrix.skip_tests }}
       PLATFORM: ${{ matrix.platform }}
-      BUILD_DIR: ${{ runner.temp }}/hadoop-${{ matrix.version }}-${{ matrix.platform }}-java${{ matrix.java_version }}
+      BUILD_DIR: ${{ github.workspace }}/hadoop-build-${{ matrix.version }}-${{ matrix.platform }}-java${{ matrix.java_version }}
     
     steps:
     - name: Setup Build Environment
@@ -273,11 +273,19 @@ jobs:
         mkdir -p "$BUILD_DIR"
         echo "BUILD_DIR=$BUILD_DIR" >> $GITHUB_ENV
         
+        # Set absolute path for cross-platform compatibility
+        if [[ "${{ matrix.platform }}" == "windows" ]]; then
+          ABS_BUILD_DIR=$(cygpath -w "$BUILD_DIR" 2>/dev/null || echo "$BUILD_DIR")
+        else
+          ABS_BUILD_DIR=$(realpath "$BUILD_DIR" 2>/dev/null || echo "$BUILD_DIR")
+        fi
+        echo "ABS_BUILD_DIR=$ABS_BUILD_DIR" >> $GITHUB_ENV
+        
         # Set platform-specific configurations
         case "${{ matrix.platform }}" in
           windows)
             echo "IS_WINDOWS=true" >> $GITHUB_ENV
-            echo "MAVEN_OPTS=-Xmx4096M -Xss512M -XX:MaxMetaspaceSize=512M" >> $GITHUB_ENV
+            echo "MAVEN_OPTS=-Xmx4096M -Xss512M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8" >> $GITHUB_ENV
             ;;
           macos)
             echo "IS_MACOS=true" >> $GITHUB_ENV
@@ -309,33 +317,110 @@ jobs:
       with:
         python-version: '3.12'
 
-    - name: Install Platform Dependencies (Ubuntu)
-      if: matrix.platform == 'ubuntu'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential cmake pkg-config
-        
-        # Install optional native dependencies if building native
-        if [[ "${{ matrix.build_native }}" == "true" ]]; then
-          sudo apt-get install -y libssl-dev libsnappy-dev libbz2-dev libzstd-dev liblz4-dev
-        fi
-
-    - name: Install Platform Dependencies (macOS)
-      if: matrix.platform == 'macos'
-      run: |
-        brew install cmake pkg-config
-        
-        # Install optional native dependencies if building native
-        if [[ "${{ matrix.build_native }}" == "true" ]]; then
-          brew install openssl snappy zstd lz4
-        fi
-
-    - name: Add Git Unix Tools to PATH (Windows)
+    - name: Set up Build Tools (Windows)
       if: matrix.platform == 'windows'
       shell: bash
       run: |
-        echo "C:/Program Files/Git/bin" >> $GITHUB_PATH
-        echo "C:/Program Files/Git/usr/bin" >> $GITHUB_PATH
+        echo "=== Setting up Windows Build Tools ==="
+        
+        # Ensure we have required Windows build tools
+        echo "Checking for Visual Studio Build Tools..."
+        if command -v cl.exe >/dev/null 2>&1; then
+          echo "✅ Visual Studio compiler found"
+        else
+          echo "⚠️ Visual Studio compiler not found - native builds may fail"
+        fi
+        
+        # Set Windows-specific environment
+        echo "JAVA_TOOL_OPTIONS=-Dfile.encoding=UTF-8 -Djava.awt.headless=true" >> $GITHUB_ENV
+        echo "HADOOP_WIN_DIR=$BUILD_DIR\\hadoop-dist" >> $GITHUB_ENV
+
+    - name: Set up Build Tools (macOS)
+      if: matrix.platform == 'macos'
+      run: |
+        echo "=== Setting up macOS Build Tools ==="
+        
+        # Check for Xcode command line tools
+        if xcode-select -p >/dev/null 2>&1; then
+          echo "✅ Xcode command line tools found"
+        else
+          echo "Installing Xcode command line tools..."
+          xcode-select --install || true
+        fi
+
+    - name: Set up Build Tools (Ubuntu)
+      if: matrix.platform == 'ubuntu'
+      run: |
+        echo "=== Setting up Ubuntu Build Tools ==="
+        
+        # Update package lists
+        sudo apt-get update -qq
+        
+        # Install essential build tools
+        sudo apt-get install -y \
+          build-essential \
+          cmake \
+          pkg-config \
+          libssl-dev \
+          zlib1g-dev \
+          libbz2-dev \
+          libffi-dev \
+          liblzma-dev
+        
+        # Install optional native dependencies if building native
+        if [[ "${{ matrix.build_native }}" == "true" ]]; then
+          sudo apt-get install -y \
+            libsnappy-dev \
+            libzstd-dev \
+            liblz4-dev \
+            libsasl2-dev \
+            libcurl4-openssl-dev
+          echo "✅ Native build dependencies installed"
+        fi
+
+    - name: Validate Build Environment
+      shell: bash
+      run: |
+        echo "=== Validating Build Environment ==="
+        
+        echo "System Information:"
+        echo "- OS: ${{ matrix.platform }}"
+        echo "- Runner: ${{ matrix.runner }}"
+        echo "- Architecture: $(uname -m 2>/dev/null || echo 'unknown')"
+        
+        echo ""
+        echo "Java Configuration:"
+        java -version
+        echo "JAVA_HOME: ${JAVA_HOME:-'not set'}"
+        
+        echo ""
+        echo "Maven Configuration:"
+        mvn --version
+        echo "MAVEN_OPTS: ${MAVEN_OPTS:-'not set'}"
+        
+        echo ""
+        echo "Build Configuration:"
+        echo "- Hadoop Version: ${{ matrix.version }}"
+        echo "- Build Native: ${{ matrix.build_native }}"
+        echo "- Skip Tests: ${{ matrix.skip_tests }}"
+        echo "- Build Directory: $BUILD_DIR"
+        
+        echo ""
+        echo "Environment Validation:"
+        if [[ -d "$BUILD_DIR" ]]; then
+          echo "✅ Build directory exists"
+        else
+          echo "❌ Build directory missing"
+          exit 1
+        fi
+        
+        # Check available disk space
+        if command -v df >/dev/null 2>&1; then
+          echo "Available disk space:"
+          df -h "$BUILD_DIR" 2>/dev/null || df -h . 2>/dev/null || echo "Could not check disk space"
+        fi
+        
+        echo "✅ Environment validation completed"
 
     - name: Clone Hadoop Repository
       shell: bash
@@ -385,7 +470,9 @@ jobs:
     - name: Cache Maven Dependencies
       uses: actions/cache@v4
       with:
-        path: ~/.m2/repository
+        path: |
+          ~/.m2/repository
+          !~/.m2/repository/org/apache/hadoop
         key: ${{ runner.os }}-maven-java${{ matrix.java_version }}-hadoop-${{ env.DETECTED_HADOOP_VERSION }}-${{ hashFiles('**/pom.xml') }}
         restore-keys: |
           ${{ runner.os }}-maven-java${{ matrix.java_version }}-hadoop-${{ env.DETECTED_HADOOP_VERSION }}-
@@ -460,10 +547,11 @@ jobs:
         
         echo "Build command: mvn ${BUILD_FLAGS[*]}"
         
-        # Execute build
+        # Execute build with error handling
+        echo "Starting Hadoop build..."
         set +e
-        mvn "${BUILD_FLAGS[@]}"
-        BUILD_EXIT_CODE=$?
+        mvn "${BUILD_FLAGS[@]}" 2>&1 | tee build.log
+        BUILD_EXIT_CODE=${PIPESTATUS[0]}
         set -e
         
         # Analyze build result
@@ -514,8 +602,8 @@ jobs:
         esac
         
         set +e
-        mvn "${TEST_FLAGS[@]}"
-        TEST_EXIT_CODE=$?
+        mvn "${TEST_FLAGS[@]}" 2>&1 | tee test.log
+        TEST_EXIT_CODE=${PIPESTATUS[0]}
         set -e
         
         if [[ $TEST_EXIT_CODE -eq 0 ]]; then
@@ -630,7 +718,9 @@ jobs:
         path: |
           ${{ env.BUILD_DIR }}/hadoop-dist/target/*.tar.gz
           ${{ env.BUILD_DIR }}/hadoop-dist/target/*.zip
+          ${{ env.BUILD_DIR }}/hadoop-dist/target/hadoop-*.jar
           ${{ env.BUILD_DIR }}/build-report.md
+          ${{ env.BUILD_DIR }}/build.log
         retention-days: 30
 
     - name: Upload Build Logs
@@ -642,6 +732,9 @@ jobs:
           ${{ env.BUILD_DIR }}/**/target/surefire-reports/
           ${{ env.BUILD_DIR }}/**/target/failsafe-reports/
           ${{ env.BUILD_DIR }}/build-report.md
+          ${{ env.BUILD_DIR }}/build.log
+          ${{ env.BUILD_DIR }}/test.log
+          ${{ env.BUILD_DIR }}/minimal-build.log
         retention-days: 7
         if-no-files-found: ignore
 
