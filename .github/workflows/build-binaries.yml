@@ -112,6 +112,7 @@ jobs:
             3.3.*) echo "branch-3.3" ;;
             3.4.*) echo "branch-3.4" ;;
             3.5.*) echo "branch-3.5" ;;
+            4.*) echo "branch-4" ;;
             *) echo "rel/release-$version" ;;
           esac
         }
@@ -120,10 +121,10 @@ jobs:
         get_runner() {
           local platform="$1"
           case "$platform" in
-            ubuntu) echo "ubuntu-latest" ;;
-            windows) echo "windows-latest" ;;
-            macos) echo "macos-latest" ;;
-            *) echo "ubuntu-latest" ;;
+            ubuntu) echo "ubuntu-22.04" ;;
+            windows) echo "windows-2022" ;;
+            macos) echo "macos-12" ;;
+            *) echo "ubuntu-22.04" ;;
           esac
         }
         
@@ -146,18 +147,13 @@ jobs:
           else
             # Windows native builds are challenging, especially for newer versions
             case "$version" in
-              3.5.*|*-SNAPSHOT|trunk) echo "false" ;;
+              3.5.*|4.*|*-SNAPSHOT|trunk) echo "false" ;;
               *) echo "auto" ;;
             esac
           fi
         }
         
-        # Generate matrix
-        matrix_json=""
-        total_jobs=0
-        first_entry=true
-        
-        # Convert comma-separated strings to arrays
+        # Generate matrix entries
         echo "=== Processing Arrays ==="
         IFS=',' read -ra VERSION_ARRAY <<< "$VERSIONS"
         IFS=',' read -ra PLATFORM_ARRAY <<< "$PLATFORMS"
@@ -168,15 +164,13 @@ jobs:
         echo "Java array: ${JAVA_ARRAY[*]}"
         echo ""
         
-        # Start JSON array
-        matrix_entries=()
-        
         # Generate matrix entries
         echo "=== Generating Matrix Entries ==="
         matrix_entries=()
+        total_jobs=0
         
         for version in "${VERSION_ARRAY[@]}"; do
-          version=$(echo "$version" | xargs) # trim whitespace
+          version=$(echo "$version" | xargs)
           branch=$(version_to_branch "$version")
           echo "Processing version: '$version' -> branch: '$branch'"
           
@@ -190,8 +184,20 @@ jobs:
               native_build=$(should_build_native "$platform" "$version" "$BUILD_NATIVE")
               echo "    Processing Java: '$java_version' -> native: '$native_build'"
               
-              # Create matrix entry as a compact JSON object
-              matrix_entry='{"version":"'$version'","branch":"'$branch'","platform":"'$platform'","runner":"'$runner'","java_version":"'$java_version'","repository":"'$REPO'","build_native":"'$native_build'","skip_tests":"'$SKIP_TESTS'"}'
+              # Create matrix entry
+              matrix_entry=$(cat <<EOF | jq -c .
+        {
+          "version": "$version",
+          "branch": "$branch",
+          "platform": "$platform",
+          "runner": "$runner",
+          "java_version": "$java_version",
+          "repository": "$REPO",
+          "build_native": "$native_build",
+          "skip_tests": "$SKIP_TESTS"
+        }
+        EOF
+              )
               
               matrix_entries+=("$matrix_entry")
               ((total_jobs++))
@@ -200,37 +206,31 @@ jobs:
           done
         done
         
-        # Join matrix entries with commas
+        # Create final matrix JSON
         echo "=== Assembling Final Matrix ==="
-        printf -v joined '%s,' "${matrix_entries[@]}"
-        matrix_json="[${joined%,}]"
+        printf -v joined_entries '%s,' "${matrix_entries[@]}"
+        matrix_json="[${joined_entries%,}]"
         
         echo "Total jobs generated: $total_jobs"
-        echo "Matrix JSON length: ${#matrix_json}"
         
-        echo "Generated matrix with $total_jobs jobs"
-        
-        # Validate JSON before outputting
+        # Validate JSON
         if echo "$matrix_json" | jq empty 2>/dev/null; then
           echo "✅ Matrix JSON is valid"
-          echo "$matrix_json" | jq '.' || echo "$matrix_json"
         else
-          echo "❌ Matrix JSON is invalid, attempting to fix..."
-          echo "Raw matrix JSON:"
-          echo "$matrix_json"
-          
-          # Try to create a simpler matrix format
-          matrix_json='[{"version":"3.3.6","branch":"branch-3.3","platform":"ubuntu","runner":"ubuntu-latest","java_version":"11","repository":"https://github.com/apache/hadoop.git","build_native":"false","skip_tests":"true"},{"version":"3.3.6","branch":"branch-3.3","platform":"windows","runner":"windows-latest","java_version":"11","repository":"https://github.com/apache/hadoop.git","build_native":"false","skip_tests":"true"},{"version":"3.4.0","branch":"branch-3.4","platform":"ubuntu","runner":"ubuntu-latest","java_version":"11","repository":"https://github.com/apache/hadoop.git","build_native":"false","skip_tests":"true"},{"version":"3.4.0","branch":"branch-3.4","platform":"windows","runner":"windows-latest","java_version":"11","repository":"https://github.com/apache/hadoop.git","build_native":"false","skip_tests":"true"}]'
-          echo "Using fallback matrix"
+          echo "❌ Matrix JSON is invalid, using fallback"
+          matrix_json='[{"version":"3.3.6","branch":"branch-3.3","platform":"ubuntu","runner":"ubuntu-22.04","java_version":"11","repository":"https://github.com/apache/hadoop.git","build_native":"false","skip_tests":"true"}]'
+          total_jobs=1
         fi
         
-        # Output for GitHub - ensure proper JSON format
-        echo "matrix={\"include\":$matrix_json}" >> $GITHUB_OUTPUT
-        echo "total-jobs=$total_jobs" >> $GITHUB_OUTPUT
+        # Output for GitHub
+        {
+          echo "matrix={\"include\":$matrix_json}"
+          echo "total-jobs=$total_jobs"
+        } >> "$GITHUB_OUTPUT"
 
   # Validation job to check inputs and repository access
   validate-inputs:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: prepare-matrix
     if: needs.prepare-matrix.outputs.total-jobs > 0
     steps:
@@ -245,22 +245,20 @@ jobs:
         REPO="${{ github.event.inputs.hadoop_repo || env.DEFAULT_REPO }}"
         echo "Validating repository access: $REPO"
         
-        # Simple connectivity check instead of ls-remote which can be slow
-        if curl -s --head "$REPO" | head -n 1 | grep -q "200 OK"; then
-          echo "✅ Repository URL is accessible"
-        elif git ls-remote --heads "$REPO" >/dev/null 2>&1; then
-          echo "✅ Repository access validated via git"
+        # Check repository accessibility
+        if git ls-remote --heads "$REPO" >/dev/null 2>&1; then
+          echo "✅ Repository access validated"
         else
-          echo "⚠️ Could not verify repository access, but continuing..."
+          echo "❌ Repository access failed"
+          exit 1
         fi
         
-        # Check if we're within reasonable job limits
+        # Check job limits
         MAX_JOBS="${{ github.event.inputs.parallel_jobs || '6' }}"
         TOTAL_JOBS="${{ needs.prepare-matrix.outputs.total-jobs }}"
         
         if [[ $TOTAL_JOBS -gt $MAX_JOBS ]]; then
           echo "⚠️ Warning: $TOTAL_JOBS jobs requested, but limit is $MAX_JOBS"
-          echo "Consider reducing the number of versions/platforms/Java versions"
         fi
         
         echo "✅ Configuration validation completed"
@@ -303,29 +301,20 @@ jobs:
         
         # Create build directory
         mkdir -p "$BUILD_DIR"
-        echo "BUILD_DIR=$BUILD_DIR" >> $GITHUB_ENV
-        
-        # Set absolute path for cross-platform compatibility
-        if [[ "${{ matrix.platform }}" == "windows" ]]; then
-          ABS_BUILD_DIR=$(cygpath -w "$BUILD_DIR" 2>/dev/null || echo "$BUILD_DIR")
-        else
-          ABS_BUILD_DIR=$(realpath "$BUILD_DIR" 2>/dev/null || echo "$BUILD_DIR")
-        fi
-        echo "ABS_BUILD_DIR=$ABS_BUILD_DIR" >> $GITHUB_ENV
         
         # Set platform-specific configurations
         case "${{ matrix.platform }}" in
           windows)
-            echo "IS_WINDOWS=true" >> $GITHUB_ENV
-            echo "MAVEN_OPTS=-Xmx4096M -Xss512M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8" >> $GITHUB_ENV
+            echo "IS_WINDOWS=true" >> "$GITHUB_ENV"
+            echo "MAVEN_OPTS=-Xmx4096M -Xss512M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8" >> "$GITHUB_ENV"
             ;;
           macos)
-            echo "IS_MACOS=true" >> $GITHUB_ENV
-            echo "MAVEN_OPTS=-Xmx6144M -Xss512M -XX:MaxMetaspaceSize=512M" >> $GITHUB_ENV
+            echo "IS_MACOS=true" >> "$GITHUB_ENV"
+            echo "MAVEN_OPTS=-Xmx6144M -Xss512M -XX:MaxMetaspaceSize=512M" >> "$GITHUB_ENV"
             ;;
           ubuntu)
-            echo "IS_LINUX=true" >> $GITHUB_ENV
-            echo "MAVEN_OPTS=-Xmx8192M -Xss512M -XX:MaxMetaspaceSize=512M" >> $GITHUB_ENV
+            echo "IS_LINUX=true" >> "$GITHUB_ENV"
+            echo "MAVEN_OPTS=-Xmx8192M -Xss512M -XX:MaxMetaspaceSize=512M" >> "$GITHUB_ENV"
             ;;
         esac
 
@@ -337,17 +326,19 @@ jobs:
         git config --global core.autocrlf false
         git config --global core.preloadindex true
         git config --global core.fscache true
+        git config --global init.defaultBranch main
 
     - name: Set up Java
       uses: actions/setup-java@v4
       with:
         java-version: ${{ matrix.java_version }}
         distribution: 'temurin'
+        cache: maven
 
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.12'
+        python-version: '3.11'
 
     - name: Set up Build Tools (Windows)
       if: matrix.platform == 'windows'
@@ -355,8 +346,7 @@ jobs:
       run: |
         echo "=== Setting up Windows Build Tools ==="
         
-        # Ensure we have required Windows build tools
-        echo "Checking for Visual Studio Build Tools..."
+        # Check for Visual Studio Build Tools
         if command -v cl.exe >/dev/null 2>&1; then
           echo "✅ Visual Studio compiler found"
         else
@@ -364,20 +354,19 @@ jobs:
         fi
         
         # Set Windows-specific environment
-        echo "JAVA_TOOL_OPTIONS=-Dfile.encoding=UTF-8 -Djava.awt.headless=true" >> $GITHUB_ENV
-        echo "HADOOP_WIN_DIR=$BUILD_DIR\\hadoop-dist" >> $GITHUB_ENV
+        {
+          echo "JAVA_TOOL_OPTIONS=-Dfile.encoding=UTF-8 -Djava.awt.headless=true"
+          echo "HADOOP_WIN_DIR=$BUILD_DIR\\hadoop-dist"
+        } >> "$GITHUB_ENV"
 
     - name: Set up Build Tools (macOS)
       if: matrix.platform == 'macos'
       run: |
         echo "=== Setting up macOS Build Tools ==="
         
-        # Check for Xcode command line tools
-        if xcode-select -p >/dev/null 2>&1; then
-          echo "✅ Xcode command line tools found"
-        else
-          echo "Installing Xcode command line tools..."
-          xcode-select --install || true
+        # Install Homebrew dependencies for native builds
+        if [[ "${{ matrix.build_native }}" == "true" ]]; then
+          brew install cmake pkg-config openssl zlib snappy lz4 zstd
         fi
 
     - name: Set up Build Tools (Ubuntu)
@@ -397,16 +386,20 @@ jobs:
           zlib1g-dev \
           libbz2-dev \
           libffi-dev \
-          liblzma-dev
+          liblzma-dev \
+          libxml2-dev \
+          libxslt1-dev
         
-        # Install optional native dependencies if building native
+        # Install native dependencies if needed
         if [[ "${{ matrix.build_native }}" == "true" ]]; then
           sudo apt-get install -y \
             libsnappy-dev \
             libzstd-dev \
             liblz4-dev \
             libsasl2-dev \
-            libcurl4-openssl-dev
+            libcurl4-openssl-dev \
+            libprotobuf-dev \
+            protobuf-compiler
           echo "✅ Native build dependencies installed"
         fi
 
@@ -437,19 +430,11 @@ jobs:
         echo "- Skip Tests: ${{ matrix.skip_tests }}"
         echo "- Build Directory: $BUILD_DIR"
         
-        echo ""
-        echo "Environment Validation:"
-        if [[ -d "$BUILD_DIR" ]]; then
-          echo "✅ Build directory exists"
-        else
-          echo "❌ Build directory missing"
-          exit 1
-        fi
-        
         # Check available disk space
         if command -v df >/dev/null 2>&1; then
+          echo ""
           echo "Available disk space:"
-          df -h "$BUILD_DIR" 2>/dev/null || df -h . 2>/dev/null || echo "Could not check disk space"
+          df -h . 2>/dev/null || echo "Could not check disk space"
         fi
         
         echo "✅ Environment validation completed"
@@ -462,13 +447,20 @@ jobs:
         echo "Branch: $HADOOP_BRANCH"
         echo "Target: $BUILD_DIR"
         
-        # Clone with shallow depth for efficiency
-        git clone --depth 10 --branch "$HADOOP_BRANCH" "$HADOOP_REPO" "$BUILD_DIR"
+        # Clone with optimized settings
+        git clone \
+          --depth 50 \
+          --branch "$HADOOP_BRANCH" \
+          --single-branch \
+          --filter=blob:none \
+          "$HADOOP_REPO" \
+          "$BUILD_DIR"
+        
         cd "$BUILD_DIR"
         
         # Get commit info
         COMMIT=$(git rev-parse HEAD)
-        echo "HADOOP_COMMIT=$COMMIT" >> $GITHUB_ENV
+        echo "HADOOP_COMMIT=$COMMIT" >> "$GITHUB_ENV"
         
         echo "✅ Repository cloned successfully"
         echo "Commit: $COMMIT"
@@ -482,21 +474,21 @@ jobs:
         VERSION=""
         
         # Try Maven first
-        if command -v mvn >/dev/null 2>&1; then
-          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        if [[ -f pom.xml ]]; then
+          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
         fi
         
         # Fallback to pom.xml parsing
         if [[ -z "$VERSION" && -f pom.xml ]]; then
-          VERSION=$(grep -E '<version>[0-9]+\.[0-9]+\.[0-9]+' pom.xml | head -1 | sed 's/.*<version>\([^<]*\)<\/version>.*/\1/')
+          VERSION=$(grep -E '<version>[0-9]+\.[0-9]+\.[0-9]+' pom.xml | head -1 | sed 's/.*<version>\([^<]*\)<\/version>.*/\1/' || true)
         fi
         
-        # Final fallback based on matrix version
+        # Final fallback
         if [[ -z "$VERSION" ]]; then
           VERSION="${{ matrix.version }}"
         fi
         
-        echo "DETECTED_HADOOP_VERSION=$VERSION" >> $GITHUB_ENV
+        echo "DETECTED_HADOOP_VERSION=$VERSION" >> "$GITHUB_ENV"
         echo "✅ Detected Hadoop Version: $VERSION"
 
     - name: Cache Maven Dependencies
@@ -518,17 +510,23 @@ jobs:
       run: |
         echo "=== Building Hadoop ${{ env.DETECTED_HADOOP_VERSION }} ==="
         
-        # Set build flags based on platform and configuration
-        BUILD_FLAGS=()
-        BUILD_FLAGS+=("clean" "package")
-        BUILD_FLAGS+=("-Dhttps.protocols=TLSv1.2")
-        BUILD_FLAGS+=("$MAVEN_CLI_OPTS")
-        BUILD_FLAGS+=("-Pdist")
-        BUILD_FLAGS+=("-Dtar")
+        # Set build flags
+        BUILD_FLAGS=(
+          "clean"
+          "package"
+          "-Dhttps.protocols=TLSv1.2"
+          "$MAVEN_CLI_OPTS"
+          "-Pdist"
+          "-Dtar"
+          "-Dmaven.javadoc.skip=true"
+          "-Dmaven.source.skip=true"
+          "--fail-at-end"
+          "-T" "1C"
+        )
         
         # Test configuration
         if [[ "$SKIP_TESTS" == "true" ]]; then
-          BUILD_FLAGS+=("-DskipTests")
+          BUILD_FLAGS+=("-DskipTests" "-Dmaven.test.skip=true")
         fi
         
         # Native build configuration
@@ -539,71 +537,60 @@ jobs:
             ;;
           false)
             echo "🔧 Disabling native build"
-            BUILD_FLAGS+=("-Dnative=false")
-            BUILD_FLAGS+=("-Drequire.libhadoop=false")
-            BUILD_FLAGS+=("-Drequire.snappy=false")
-            BUILD_FLAGS+=("-Drequire.openssl=false")
+            BUILD_FLAGS+=("-Dnative=false" "-Drequire.libhadoop=false" "-Drequire.snappy=false" "-Drequire.openssl=false")
             ;;
           auto)
             echo "🔧 Auto-detecting native capabilities"
-            # Let Maven decide based on available tools
             ;;
         esac
         
         # Platform-specific configurations
         case "${{ matrix.platform }}" in
           windows)
-            BUILD_FLAGS+=("-Dwindows")
-            BUILD_FLAGS+=("-Dplatform.name=generic")
-            BUILD_FLAGS+=("-Duse.platformToolsetVersion=v143")
-            BUILD_FLAGS+=("-Dhadoop.skip.shaded.check=true")
-            BUILD_FLAGS+=("-Denforcer.skip=true")
-            
-            # Skip problematic modules on Windows
-            BUILD_FLAGS+=("-pl" "!hadoop-hdfs-project/hadoop-hdfs-native-client")
-            BUILD_FLAGS+=("-pl" "!hadoop-yarn-project/hadoop-yarn-applications/hadoop-yarn-applications-mawo")
+            BUILD_FLAGS+=(
+              "-Dplatform.name=win32"
+              "-Dhadoop.skip.shaded.check=true"
+              "-Denforcer.skip=true"
+              "-pl" "!hadoop-hdfs-project/hadoop-hdfs-native-client"
+              "-pl" "!hadoop-yarn-project/hadoop-yarn-applications/hadoop-yarn-applications-mawo"
+            )
             ;;
           macos)
-            BUILD_FLAGS+=("-Dplatform.name=Darwin")
+            BUILD_FLAGS+=("-Dplatform.name=Mac_OS_X")
             ;;
           ubuntu)
             BUILD_FLAGS+=("-Dplatform.name=Linux")
             ;;
         esac
         
-        # Memory and performance optimizations
-        BUILD_FLAGS+=("-T" "1C")
-        BUILD_FLAGS+=("-Dmaven.compile.failOnError=false")
-        BUILD_FLAGS+=("-Dmaven.javadoc.skip=true")
-        BUILD_FLAGS+=("--fail-at-end")
-        
         echo "Build command: mvn ${BUILD_FLAGS[*]}"
         
-        # Execute build with error handling
-        echo "Starting Hadoop build..."
+        # Execute build with proper error handling
         set +e
-        mvn "${BUILD_FLAGS[@]}" 2>&1 | tee build.log
+        timeout 180m mvn "${BUILD_FLAGS[@]}" 2>&1 | tee build.log
         BUILD_EXIT_CODE=${PIPESTATUS[0]}
         set -e
         
-        # Analyze build result
         if [[ $BUILD_EXIT_CODE -eq 0 ]]; then
-          echo "BUILD_STATUS=success" >> $GITHUB_ENV
+          echo "BUILD_STATUS=success" >> "$GITHUB_ENV"
           echo "✅ Build completed successfully"
+        elif [[ $BUILD_EXIT_CODE -eq 124 ]]; then
+          echo "BUILD_STATUS=timeout" >> "$GITHUB_ENV"
+          echo "⏰ Build timed out after 3 hours"
         else
-          echo "BUILD_STATUS=failed" >> $GITHUB_ENV
+          echo "BUILD_STATUS=failed" >> "$GITHUB_ENV"
           echo "❌ Build failed with exit code: $BUILD_EXIT_CODE"
           
-          # For Windows, try a minimal build
+          # Try minimal build for Windows
           if [[ "${{ matrix.platform }}" == "windows" ]]; then
             echo "🔄 Attempting minimal Windows build..."
             set +e
-            mvn package -DskipTests -Pdist -Dtar -Dnative=false --fail-never
+            mvn package -DskipTests -Pdist -Dtar -Dnative=false -Dmaven.javadoc.skip=true --fail-never 2>&1 | tee minimal-build.log
             MINIMAL_EXIT_CODE=$?
             set -e
             
             if [[ $MINIMAL_EXIT_CODE -eq 0 ]]; then
-              echo "BUILD_STATUS=partial_success" >> $GITHUB_ENV
+              echo "BUILD_STATUS=partial_success" >> "$GITHUB_ENV"
               echo "⚠️ Minimal build succeeded"
             fi
           fi
@@ -616,33 +603,27 @@ jobs:
       run: |
         echo "=== Running Hadoop Tests ==="
         
-        # Run a subset of tests based on platform
-        TEST_FLAGS=()
-        TEST_FLAGS+=("test")
-        TEST_FLAGS+=("$MAVEN_CLI_OPTS")
-        TEST_FLAGS+=("-Dmaven.test.failure.ignore=true")
-        
-        case "${{ matrix.platform }}" in
-          windows)
-            # Run Windows-specific tests
-            TEST_FLAGS+=("-Dtest=**/TestWinUtils.java,**/TestWindowsBasedProcessTree.java")
-            ;;
-          *)
-            # Run core tests
-            TEST_FLAGS+=("-Dtest=**/TestFileUtil.java,**/TestConfiguration.java")
-            ;;
-        esac
+        # Run essential tests only to avoid timeouts
+        TEST_FLAGS=(
+          "test"
+          "$MAVEN_CLI_OPTS"
+          "-Dmaven.test.failure.ignore=true"
+          "-Dtest=**/TestFileUtil.java,**/TestConfiguration.java"
+        )
         
         set +e
-        mvn "${TEST_FLAGS[@]}" 2>&1 | tee test.log
+        timeout 60m mvn "${TEST_FLAGS[@]}" 2>&1 | tee test.log
         TEST_EXIT_CODE=${PIPESTATUS[0]}
         set -e
         
         if [[ $TEST_EXIT_CODE -eq 0 ]]; then
-          echo "TEST_STATUS=passed" >> $GITHUB_ENV
+          echo "TEST_STATUS=passed" >> "$GITHUB_ENV"
           echo "✅ Tests passed"
+        elif [[ $TEST_EXIT_CODE -eq 124 ]]; then
+          echo "TEST_STATUS=timeout" >> "$GITHUB_ENV"
+          echo "⏰ Tests timed out"
         else
-          echo "TEST_STATUS=failed" >> $GITHUB_ENV
+          echo "TEST_STATUS=failed" >> "$GITHUB_ENV"
           echo "⚠️ Some tests failed (exit code: $TEST_EXIT_CODE)"
         fi
 
@@ -657,13 +638,13 @@ jobs:
         
         # Look for distribution artifacts
         if [[ -d "hadoop-dist/target" ]]; then
-          DIST_FILES=$(find hadoop-dist/target -name "*.tar.gz" -o -name "*.zip" 2>/dev/null || true)
-          if [[ -n "$DIST_FILES" ]]; then
+          DIST_FILES=$(find hadoop-dist/target -name "*.tar.gz" -o -name "*.zip" 2>/dev/null | head -10)
+          if [[ -n "$DIST_FILES" && $(echo "$DIST_FILES" | wc -l) -gt 0 ]]; then
             ARTIFACTS_FOUND=true
             echo "📦 Distribution artifacts found:"
-            echo "$DIST_FILES" | while read -r file; do
+            echo "$DIST_FILES" | while IFS= read -r file; do
               if [[ -f "$file" ]]; then
-                SIZE=$(du -h "$file" | cut -f1)
+                SIZE=$(du -h "$file" 2>/dev/null | cut -f1 || echo "unknown size")
                 echo "  - $(basename "$file") ($SIZE)"
               fi
             done
@@ -671,21 +652,24 @@ jobs:
         fi
         
         # Check for native libraries
-        NATIVE_FILES=$(find . -name "*.so" -o -name "*.dll" -o -name "*.dylib" 2>/dev/null || true)
-        if [[ -n "$NATIVE_FILES" ]]; then
+        NATIVE_FILES=$(find . -name "*.so" -o -name "*.dll" -o -name "*.dylib" 2>/dev/null | head -10)
+        if [[ -n "$NATIVE_FILES" && $(echo "$NATIVE_FILES" | wc -l) -gt 0 ]]; then
           NATIVE_LIBS_FOUND=true
           echo "🔧 Native libraries found:"
-          echo "$NATIVE_FILES" | head -5 | while read -r file; do
+          echo "$NATIVE_FILES" | while IFS= read -r file; do
             echo "  - $file"
           done
         fi
         
-        echo "ARTIFACTS_FOUND=$ARTIFACTS_FOUND" >> $GITHUB_ENV
-        echo "NATIVE_LIBS_FOUND=$NATIVE_LIBS_FOUND" >> $GITHUB_ENV
+        {
+          echo "ARTIFACTS_FOUND=$ARTIFACTS_FOUND"
+          echo "NATIVE_LIBS_FOUND=$NATIVE_LIBS_FOUND"
+        } >> "$GITHUB_ENV"
         
         echo "✅ Artifact analysis completed"
 
     - name: Generate Build Report
+      if: always()
       shell: bash
       working-directory: ${{ env.BUILD_DIR }}
       run: |
@@ -693,15 +677,17 @@ jobs:
         
         BUILD_STATUS="${BUILD_STATUS:-unknown}"
         TEST_STATUS="${TEST_STATUS:-skipped}"
+        ARTIFACTS_FOUND="${ARTIFACTS_FOUND:-false}"
+        NATIVE_LIBS_FOUND="${NATIVE_LIBS_FOUND:-false}"
         
-        cat > build-report.md << EOF
+        cat > build-report.md << 'EOF'
         # Hadoop Build Report
         
         **Version**: ${{ env.DETECTED_HADOOP_VERSION }}
         **Platform**: ${{ matrix.platform }}
         **Java Version**: ${{ matrix.java_version }}
-        **Build Status**: $BUILD_STATUS
-        **Test Status**: $TEST_STATUS
+        **Build Status**: ${BUILD_STATUS}
+        **Test Status**: ${TEST_STATUS}
         **Timestamp**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
         
         ## Configuration
@@ -712,8 +698,18 @@ jobs:
         - **Skip Tests**: ${{ matrix.skip_tests }}
         
         ## Results
-        - **Build**: $(if [[ "$BUILD_STATUS" == "success" ]]; then echo "✅ SUCCESS"; elif [[ "$BUILD_STATUS" == "partial_success" ]]; then echo "⚠️ PARTIAL SUCCESS"; else echo "❌ FAILED"; fi)
-        - **Tests**: $(if [[ "$TEST_STATUS" == "passed" ]]; then echo "✅ PASSED"; elif [[ "$TEST_STATUS" == "failed" ]]; then echo "⚠️ SOME FAILED"; else echo "⏭️ SKIPPED"; fi)
+        - **Build**: $(case "$BUILD_STATUS" in
+          success) echo "✅ SUCCESS" ;;
+          partial_success) echo "⚠️ PARTIAL SUCCESS" ;;
+          timeout) echo "⏰ TIMEOUT" ;;
+          *) echo "❌ FAILED" ;;
+        esac)
+        - **Tests**: $(case "$TEST_STATUS" in
+          passed) echo "✅ PASSED" ;;
+          failed) echo "⚠️ SOME FAILED" ;;
+          timeout) echo "⏰ TIMEOUT" ;;
+          *) echo "⏭️ SKIPPED" ;;
+        esac)
         - **Artifacts**: $(if [[ "$ARTIFACTS_FOUND" == "true" ]]; then echo "✅ CREATED"; else echo "❌ MISSING"; fi)
         - **Native Libs**: $(if [[ "$NATIVE_LIBS_FOUND" == "true" ]]; then echo "✅ PRESENT"; else echo "❌ NOT FOUND"; fi)
         
@@ -725,20 +721,33 @@ jobs:
         esac)
         
         ## Next Steps
-        $(if [[ "$BUILD_STATUS" == "success" ]]; then
-          echo "1. Download and extract the distribution artifacts"
-          echo "2. Configure HADOOP_HOME and PATH variables"
-          echo "3. Test the installation in your target environment"
-        elif [[ "$BUILD_STATUS" == "partial_success" ]]; then
-          echo "1. Review build logs for specific module failures"
-          echo "2. Consider using available artifacts for development"
-          echo "3. Report any critical issues to the Hadoop community"
-        else
-          echo "1. Review detailed build logs for error analysis"
-          echo "2. Check system requirements and dependencies"
-          echo "3. Consider building on a different platform"
-        fi)
+        $(case "$BUILD_STATUS" in
+          success)
+            echo "1. Download and extract the distribution artifacts"
+            echo "2. Configure HADOOP_HOME and PATH variables"
+            echo "3. Test the installation in your target environment"
+            ;;
+          partial_success)
+            echo "1. Review build logs for specific module failures"
+            echo "2. Consider using available artifacts for development"
+            echo "3. Report any critical issues to the Hadoop community"
+            ;;
+          timeout)
+            echo "1. Consider reducing the scope of the build"
+            echo "2. Build individual modules separately"
+            echo "3. Use a more powerful runner if available"
+            ;;
+          *)
+            echo "1. Review detailed build logs for error analysis"
+            echo "2. Check system requirements and dependencies"
+            echo "3. Consider building on a different platform"
+            ;;
+        esac)
         EOF
+        
+        # Evaluate variables in the report
+        envsubst < build-report.md > build-report-final.md
+        mv build-report-final.md build-report.md
         
         echo "✅ Build report generated"
 
@@ -754,6 +763,8 @@ jobs:
           ${{ env.BUILD_DIR }}/build-report.md
           ${{ env.BUILD_DIR }}/build.log
         retention-days: 30
+        if-no-files-found: warn
+        compression-level: 6
 
     - name: Upload Build Logs
       uses: actions/upload-artifact@v4
@@ -769,43 +780,112 @@ jobs:
           ${{ env.BUILD_DIR }}/minimal-build.log
         retention-days: 7
         if-no-files-found: ignore
+        compression-level: 6
 
   # Summary job to collect results from all builds
   build-summary:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: [prepare-matrix, build-hadoop]
     if: always()
     
     steps:
+    - name: Collect Build Results
+      id: collect-results
+      run: |
+        echo "=== Collecting Build Results ==="
+        
+        # Initialize counters
+        TOTAL_JOBS="${{ needs.prepare-matrix.outputs.total-jobs }}"
+        SUCCESS_COUNT=0
+        FAILED_COUNT=0
+        PARTIAL_COUNT=0
+        TIMEOUT_COUNT=0
+        
+        # Note: In a real scenario, you would parse the build results from artifacts
+        # or use a more sophisticated approach to collect job statuses
+        
+        echo "TOTAL_JOBS=$TOTAL_JOBS" >> "$GITHUB_OUTPUT"
+        echo "SUCCESS_COUNT=$SUCCESS_COUNT" >> "$GITHUB_OUTPUT"
+        echo "FAILED_COUNT=$FAILED_COUNT" >> "$GITHUB_OUTPUT"
+        echo "PARTIAL_COUNT=$PARTIAL_COUNT" >> "$GITHUB_OUTPUT"
+        echo "TIMEOUT_COUNT=$TIMEOUT_COUNT" >> "$GITHUB_OUTPUT"
+    
     - name: Generate Overall Summary
       run: |
-        echo "=== Multi-Version Hadoop Build Summary ===" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Total Jobs**: ${{ needs.prepare-matrix.outputs.total-jobs }}" >> $GITHUB_STEP_SUMMARY
-        echo "**Trigger**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
-        echo "**Timestamp**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "=== Multi-Version Hadoop Build Summary ===" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        echo "**Total Jobs**: ${{ needs.prepare-matrix.outputs.total-jobs }}" >> "$GITHUB_STEP_SUMMARY"
+        echo "**Trigger**: ${{ github.event_name }}" >> "$GITHUB_STEP_SUMMARY"
+        echo "**Timestamp**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
         
         # Add configuration details
-        echo "### Configuration" >> $GITHUB_STEP_SUMMARY
-        echo "- **Versions**: ${{ github.event.inputs.versions || env.DEFAULT_VERSIONS }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Platforms**: ${{ github.event.inputs.platforms || env.DEFAULT_PLATFORMS }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Java Versions**: ${{ github.event.inputs.java_versions || env.DEFAULT_JAVA_VERSIONS }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Build Native**: ${{ github.event.inputs.build_native || 'false' }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Skip Tests**: ${{ github.event.inputs.skip_tests || 'true' }}" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Configuration" >> "$GITHUB_STEP_SUMMARY"
+        echo "- **Versions**: ${{ github.event.inputs.versions || env.DEFAULT_VERSIONS }}" >> "$GITHUB_STEP_SUMMARY"
+        echo "- **Platforms**: ${{ github.event.inputs.platforms || env.DEFAULT_PLATFORMS }}" >> "$GITHUB_STEP_SUMMARY"
+        echo "- **Java Versions**: ${{ github.event.inputs.java_versions || env.DEFAULT_JAVA_VERSIONS }}" >> "$GITHUB_STEP_SUMMARY"
+        echo "- **Build Native**: ${{ github.event.inputs.build_native || 'false' }}" >> "$GITHUB_STEP_SUMMARY"
+        echo "- **Skip Tests**: ${{ github.event.inputs.skip_tests || 'true' }}" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
         
-        # Build results will be populated by the matrix results
-        echo "### Build Results" >> $GITHUB_STEP_SUMMARY
-        echo "Check individual job results for detailed status information." >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
+        # Build results summary
+        echo "### Build Results" >> "$GITHUB_STEP_SUMMARY"
+        echo "Check individual job results for detailed status information." >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
         
-        echo "### Artifacts" >> $GITHUB_STEP_SUMMARY
-        echo "Successful builds will have their distribution packages available in the Actions artifacts section." >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
+        # Add workflow status badge
+        if [[ "${{ needs.build-hadoop.result }}" == "success" ]]; then
+          echo "🟢 **Overall Status**: All builds completed successfully" >> "$GITHUB_STEP_SUMMARY"
+        elif [[ "${{ needs.build-hadoop.result }}" == "failure" ]]; then
+          echo "🔴 **Overall Status**: Some builds failed" >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo "🟡 **Overall Status**: Builds completed with mixed results" >> "$GITHUB_STEP_SUMMARY"
+        fi
+        echo "" >> "$GITHUB_STEP_SUMMARY"
         
-        echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
-        echo "1. **Download artifacts** from successful builds" >> $GITHUB_STEP_SUMMARY
-        echo "2. **Review build reports** for platform-specific notes" >> $GITHUB_STEP_SUMMARY
-        echo "3. **Test installations** in your target environments" >> $GITHUB_STEP_SUMMARY
-        echo "4. **Report issues** to the Hadoop community if needed" >> $GITHUB_STEP_SUMMARY
+        echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
+        echo "Successful builds will have their distribution packages available in the Actions artifacts section." >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        
+        echo "### Next Steps" >> "$GITHUB_STEP_SUMMARY"
+        echo "1. **Download artifacts** from successful builds" >> "$GITHUB_STEP_SUMMARY"
+        echo "2. **Review build reports** for platform-specific notes" >> "$GITHUB_STEP_SUMMARY"
+        echo "3. **Test installations** in your target environments" >> "$GITHUB_STEP_SUMMARY"
+        echo "4. **Report issues** to the Hadoop community if needed" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        
+        # Add troubleshooting section
+        echo "### Troubleshooting" >> "$GITHUB_STEP_SUMMARY"
+        echo "- **Build Failures**: Check build logs for specific error messages" >> "$GITHUB_STEP_SUMMARY"
+        echo "- **Timeouts**: Consider reducing parallel jobs or building fewer versions" >> "$GITHUB_STEP_SUMMARY"
+        echo "- **Native Builds**: Linux provides the most reliable native compilation" >> "$GITHUB_STEP_SUMMARY"
+        echo "- **Windows Issues**: Use WSL2 or Linux containers for better compatibility" >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Check Critical Failures
+      if: needs.build-hadoop.result == 'failure'
+      run: |
+        echo "=== Checking for Critical Failures ==="
+        echo "Some builds failed. Please review the individual job logs for details."
+        echo "This is normal for complex multi-platform builds like Hadoop."
+        echo "Focus on the platforms and versions most important to your use case."
+        
+        # Don't fail the workflow for partial failures
+        exit 0
+
+  # Cleanup job to manage workspace and temporary files
+  cleanup:
+    runs-on: ubuntu-22.04
+    needs: [build-summary]
+    if: always()
+    
+    steps:
+    - name: Cleanup Notification
+      run: |
+        echo "=== Build Pipeline Cleanup ==="
+        echo "Workflow completed. Temporary files and caches will be cleaned up automatically."
+        echo "Artifacts will be retained according to the configured retention policies."
+        echo ""
+        echo "Retention Policies:"
+        echo "- Build Artifacts: 30 days"
+        echo "- Build Logs: 7 days"
+        echo "- Maven Cache: Automatically managed by GitHub Actions"
