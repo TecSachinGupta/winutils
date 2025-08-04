@@ -1,4 +1,9 @@
-name: Multi-Version Hadoop Build Pipeline
+echo "### Troubleshooting" >> "$GITHUB_STEP_SUMMARY"
+        echo "- **Build Failures**: Check build logs for specific error messages" >> "$GITHUB_STEP_SUMMARY"
+        echo "- **Timeouts**: Consider reducing parallel jobs or building fewer versions" >> "$GITHUB_STEP_SUMMARY"
+        echo "- **Native Builds**: Linux provides the most reliable native compilation" >> "$GITHUB_STEP_SUMMARY"
+        echo "- **Windows Issues**: Use WSL2 or Linux containers for better compatibility" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"name: Multi-Version Hadoop Build Pipeline
 
 on:
   push:
@@ -11,13 +16,13 @@ on:
   workflow_dispatch:
     inputs:
       versions:
-        description: 'Hadoop versions to build (comma-separated, e.g., "3.3.6,3.4.0,trunk")'
+        description: 'Hadoop versions to build (comma-separated, e.g., "3.4.1,3.3.6,trunk")'
         required: false
-        default: '3.3.6,3.4.0'
+        default: '3.4.1,3.3.6'
       platforms:
         description: 'Platforms to build on (comma-separated: windows,ubuntu,macos)'
         required: false
-        default: 'ubuntu,windows'
+        default: 'windows,ubuntu'
         type: choice
         options:
           - 'ubuntu'
@@ -58,9 +63,9 @@ on:
           - '10'
 
 env:
-  # Default configurations
-  DEFAULT_VERSIONS: '3.3.6,3.4.0'
-  DEFAULT_PLATFORMS: 'ubuntu,windows'
+  # Default configurations - Windows first with Hadoop 3.4.1
+  DEFAULT_VERSIONS: '3.4.1,3.3.6'
+  DEFAULT_PLATFORMS: 'windows,ubuntu'
   DEFAULT_JAVA_VERSIONS: '11'
   DEFAULT_REPO: 'https://github.com/apache/hadoop.git'
   
@@ -153,6 +158,13 @@ jobs:
           fi
         }
         
+        # Install jq if not available
+        if ! command -v jq >/dev/null 2>&1; then
+          echo "Installing jq..."
+          sudo apt-get update -qq
+          sudo apt-get install -y jq
+        fi
+        
         # Generate matrix entries
         echo "=== Processing Arrays ==="
         IFS=',' read -ra VERSION_ARRAY <<< "$VERSIONS"
@@ -164,11 +176,15 @@ jobs:
         echo "Java array: ${JAVA_ARRAY[*]}"
         echo ""
         
-        # Generate matrix entries
+        # Create temporary file for JSON entries
+        TEMP_JSON_FILE=$(mktemp)
+        echo "[]" > "$TEMP_JSON_FILE"
+        
+        # Generate matrix entries with prioritization (Windows first)
         echo "=== Generating Matrix Entries ==="
-        matrix_entries=()
         total_jobs=0
         
+        # Prioritize Windows builds by processing platforms in order
         for version in "${VERSION_ARRAY[@]}"; do
           version=$(echo "$version" | xargs)
           branch=$(version_to_branch "$version")
@@ -184,43 +200,55 @@ jobs:
               native_build=$(should_build_native "$platform" "$version" "$BUILD_NATIVE")
               echo "    Processing Java: '$java_version' -> native: '$native_build'"
               
-              # Create matrix entry
-              matrix_entry=$(cat <<EOF | jq -c .
-        {
-          "version": "$version",
-          "branch": "$branch",
-          "platform": "$platform",
-          "runner": "$runner",
-          "java_version": "$java_version",
-          "repository": "$REPO",
-          "build_native": "$native_build",
-          "skip_tests": "$SKIP_TESTS"
-        }
-        EOF
-              )
+              # Create matrix entry using jq for proper JSON handling
+              NEW_ENTRY=$(jq -n \
+                --arg version "$version" \
+                --arg branch "$branch" \
+                --arg platform "$platform" \
+                --arg runner "$runner" \
+                --arg java_version "$java_version" \
+                --arg repository "$REPO" \
+                --arg build_native "$native_build" \
+                --arg skip_tests "$SKIP_TESTS" \
+                '{
+                  version: $version,
+                  branch: $branch,
+                  platform: $platform,
+                  runner: $runner,
+                  java_version: $java_version,
+                  repository: $repository,
+                  build_native: $build_native,
+                  skip_tests: $skip_tests
+                }')
               
-              matrix_entries+=("$matrix_entry")
+              # Add entry to array using jq
+              jq --argjson entry "$NEW_ENTRY" '. += [$entry]' "$TEMP_JSON_FILE" > "${TEMP_JSON_FILE}.tmp"
+              mv "${TEMP_JSON_FILE}.tmp" "$TEMP_JSON_FILE"
+              
               ((total_jobs++))
               echo "      Created entry $total_jobs"
             done
           done
         done
         
-        # Create final matrix JSON
-        echo "=== Assembling Final Matrix ==="
-        printf -v joined_entries '%s,' "${matrix_entries[@]}"
-        matrix_json="[${joined_entries%,}]"
+        # Read the final matrix
+        matrix_json=$(cat "$TEMP_JSON_FILE")
         
         echo "Total jobs generated: $total_jobs"
+        echo "Matrix JSON preview:"
+        echo "$matrix_json" | jq '.[0] // empty'
         
         # Validate JSON
         if echo "$matrix_json" | jq empty 2>/dev/null; then
           echo "✅ Matrix JSON is valid"
         else
           echo "❌ Matrix JSON is invalid, using fallback"
-          matrix_json='[{"version":"3.3.6","branch":"branch-3.3","platform":"ubuntu","runner":"ubuntu-22.04","java_version":"11","repository":"https://github.com/apache/hadoop.git","build_native":"false","skip_tests":"true"}]'
+          matrix_json='[{"version":"3.4.1","branch":"branch-3.4","platform":"windows","runner":"windows-2022","java_version":"11","repository":"https://github.com/apache/hadoop.git","build_native":"false","skip_tests":"true"}]'
           total_jobs=1
         fi
+        
+        # Clean up temp file
+        rm -f "$TEMP_JSON_FILE" "${TEMP_JSON_FILE}.tmp"
         
         # Output for GitHub
         {
@@ -855,11 +883,19 @@ jobs:
         echo "" >> "$GITHUB_STEP_SUMMARY"
         
         # Add troubleshooting section
-        echo "### Troubleshooting" >> "$GITHUB_STEP_SUMMARY"
-        echo "- **Build Failures**: Check build logs for specific error messages" >> "$GITHUB_STEP_SUMMARY"
-        echo "- **Timeouts**: Consider reducing parallel jobs or building fewer versions" >> "$GITHUB_STEP_SUMMARY"
-        echo "- **Native Builds**: Linux provides the most reliable native compilation" >> "$GITHUB_STEP_SUMMARY"
-        echo "- **Windows Issues**: Use WSL2 or Linux containers for better compatibility" >> "$GITHUB_STEP_SUMMARY"
+        echo "### Manual Re-run Instructions" >> "$GITHUB_STEP_SUMMARY"
+        echo "To manually re-run specific builds:" >> "$GITHUB_STEP_SUMMARY"
+        echo '```bash' >> "$GITHUB_STEP_SUMMARY"
+        echo "# Re-run with different parameters:" >> "$GITHUB_STEP_SUMMARY"
+        echo "# 1. Go to Actions tab -> Multi-Version Hadoop Build Pipeline" >> "$GITHUB_STEP_SUMMARY"
+        echo "# 2. Click 'Run workflow'" >> "$GITHUB_STEP_SUMMARY"
+        echo "# 3. Adjust parameters as needed:" >> "$GITHUB_STEP_SUMMARY"
+        echo "#    - Versions: 3.4.1,3.3.6" >> "$GITHUB_STEP_SUMMARY"
+        echo "#    - Platforms: windows (for Windows-only builds)" >> "$GITHUB_STEP_SUMMARY"
+        echo "#    - Java Versions: 11,17 (for multiple Java versions)" >> "$GITHUB_STEP_SUMMARY"
+        echo "#    - Build Native: true (if needed)" >> "$GITHUB_STEP_SUMMARY"
+        echo '```' >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
 
     - name: Check Critical Failures
       if: needs.build-hadoop.result == 'failure'
