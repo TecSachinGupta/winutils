@@ -219,16 +219,16 @@ jobs:
               
               # Create JSON object manually to avoid jq issues
               cat >> "$TEMP_FILE" << EOF
-    {
-      "version": "$version",
-      "branch": "$branch",
-      "platform": "$platform",
-      "runner": "$runner",
-      "java_version": "$java_version",
-      "repository": "$REPO",
-      "build_native": "$native_build",
-      "skip_tests": "$SKIP_TESTS"
-    }EOF
+              {
+                "version": "$version",
+                "branch": "$branch",
+                "platform": "$platform",
+                "runner": "$runner",
+                "java_version": "$java_version",
+                "repository": "$REPO",
+                "build_native": "$native_build",
+                "skip_tests": "$SKIP_TESTS"
+              }EOF
               
               ((total_jobs++))
               echo "      Created entry $total_jobs"
@@ -757,69 +757,69 @@ jobs:
         NATIVE_LIBS_FOUND="${NATIVE_LIBS_FOUND:-false}"
         
         cat > build-report.md << EOF
-# Hadoop Build Report
-
-**Version**: ${{ env.DETECTED_HADOOP_VERSION }}
-**Platform**: ${{ matrix.platform }}
-**Java Version**: ${{ matrix.java_version }}
-**Build Status**: ${BUILD_STATUS}
-**Test Status**: ${TEST_STATUS}
-**Timestamp**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-
-## Configuration
-- **Repository**: ${{ matrix.repository }}
-- **Branch**: ${{ matrix.branch }}
-- **Commit**: ${{ env.HADOOP_COMMIT }}
-- **Native Build**: ${{ matrix.build_native }}
-- **Skip Tests**: ${{ matrix.skip_tests }}
-
-## Results
-- **Build**: $(case "$BUILD_STATUS" in
-  success) echo "✅ SUCCESS" ;;
-  partial_success) echo "⚠️ PARTIAL SUCCESS" ;;
-  timeout) echo "⏰ TIMEOUT" ;;
-  *) echo "❌ FAILED" ;;
-esac)
-- **Tests**: $(case "$TEST_STATUS" in
-  passed) echo "✅ PASSED" ;;
-  failed) echo "⚠️ SOME FAILED" ;;
-  timeout) echo "⏰ TIMEOUT" ;;
-  *) echo "⏭️ SKIPPED" ;;
-esac)
-- **Artifacts**: $(if [[ "$ARTIFACTS_FOUND" == "true" ]]; then echo "✅ CREATED"; else echo "❌ MISSING"; fi)
-- **Native Libs**: $(if [[ "$NATIVE_LIBS_FOUND" == "true" ]]; then echo "✅ PRESENT"; else echo "❌ NOT FOUND"; fi)
-
-## Platform Notes
-$(case "${{ matrix.platform }}" in
-  windows) echo "- Windows builds may have limited native library support" ;;
-  macos) echo "- macOS builds require Xcode command line tools" ;;
-  ubuntu) echo "- Linux builds have the best native library support" ;;
-esac)
-
-## Next Steps
-$(case "$BUILD_STATUS" in
-  success)
-    echo "1. Download and extract the distribution artifacts"
-    echo "2. Configure HADOOP_HOME and PATH variables"
-    echo "3. Test the installation in your target environment"
-    ;;
-  partial_success)
-    echo "1. Review build logs for specific module failures"
-    echo "2. Consider using available artifacts for development"
-    echo "3. Report any critical issues to the Hadoop community"
-    ;;
-  timeout)
-    echo "1. Consider reducing the scope of the build"
-    echo "2. Build individual modules separately"
-    echo "3. Use a more powerful runner if available"
-    ;;
-  *)
-    echo "1. Review detailed build logs for error analysis"
-    echo "2. Check system requirements and dependencies"
-    echo "3. Consider building on a different platform"
-    ;;
-esac)
-EOF
+        # Hadoop Build Report
+        
+        **Version**: ${{ env.DETECTED_HADOOP_VERSION }}
+        **Platform**: ${{ matrix.platform }}
+        **Java Version**: ${{ matrix.java_version }}
+        **Build Status**: ${BUILD_STATUS}
+        **Test Status**: ${TEST_STATUS}
+        **Timestamp**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+        
+        ## Configuration
+        - **Repository**: ${{ matrix.repository }}
+        - **Branch**: ${{ matrix.branch }}
+        - **Commit**: ${{ env.HADOOP_COMMIT }}
+        - **Native Build**: ${{ matrix.build_native }}
+        - **Skip Tests**: ${{ matrix.skip_tests }}
+        
+        ## Results
+        - **Build**: $(case "$BUILD_STATUS" in
+          success) echo "✅ SUCCESS" ;;
+          partial_success) echo "⚠️ PARTIAL SUCCESS" ;;
+          timeout) echo "⏰ TIMEOUT" ;;
+          *) echo "❌ FAILED" ;;
+        esac)
+        - **Tests**: $(case "$TEST_STATUS" in
+          passed) echo "✅ PASSED" ;;
+          failed) echo "⚠️ SOME FAILED" ;;
+          timeout) echo "⏰ TIMEOUT" ;;
+          *) echo "⏭️ SKIPPED" ;;
+        esac)
+        - **Artifacts**: $(if [[ "$ARTIFACTS_FOUND" == "true" ]]; then echo "✅ CREATED"; else echo "❌ MISSING"; fi)
+        - **Native Libs**: $(if [[ "$NATIVE_LIBS_FOUND" == "true" ]]; then echo "✅ PRESENT"; else echo "❌ NOT FOUND"; fi)
+        
+        ## Platform Notes
+        $(case "${{ matrix.platform }}" in
+          windows) echo "- Windows builds may have limited native library support" ;;
+          macos) echo "- macOS builds require Xcode command line tools" ;;
+          ubuntu) echo "- Linux builds have the best native library support" ;;
+        esac)
+        
+        ## Next Steps
+        $(case "$BUILD_STATUS" in
+          success)
+            echo "1. Download and extract the distribution artifacts"
+            echo "2. Configure HADOOP_HOME and PATH variables"
+            echo "3. Test the installation in your target environment"
+            ;;
+          partial_success)
+            echo "1. Review build logs for specific module failures"
+            echo "2. Consider using available artifacts for development"
+            echo "3. Report any critical issues to the Hadoop community"
+            ;;
+          timeout)
+            echo "1. Consider reducing the scope of the build"
+            echo "2. Build individual modules separately"
+            echo "3. Use a more powerful runner if available"
+            ;;
+          *)
+            echo "1. Review detailed build logs for error analysis"
+            echo "2. Check system requirements and dependencies"
+            echo "3. Consider building on a different platform"
+            ;;
+        esac)
+        EOF
         
         echo "✅ Build report generated"
 
