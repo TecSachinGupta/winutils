@@ -211,24 +211,23 @@ jobs:
               native_build=$(should_build_native "$platform" "$version" "$BUILD_NATIVE")
               echo "    Processing Java: '$java_version' -> native: '$native_build'"
               
-              # Add comma separator if not first entry
+              # Create JSON object manually to avoid jq issues
               if [[ "$first_entry" != "true" ]]; then
                 echo "," >> "$TEMP_FILE"
               fi
               first_entry=false
               
-              # Create JSON object manually to avoid jq issues
-              cat >> "$TEMP_FILE" << EOF
-              {
-                "version": "$version",
-                "branch": "$branch",
-                "platform": "$platform",
-                "runner": "$runner",
-                "java_version": "$java_version",
-                "repository": "$REPO",
-                "build_native": "$native_build",
-                "skip_tests": "$SKIP_TESTS"
-              }EOF
+              # Build JSON string directly
+              echo "    {" >> "$TEMP_FILE"
+              echo "      \"version\": \"$version\"," >> "$TEMP_FILE"
+              echo "      \"branch\": \"$branch\"," >> "$TEMP_FILE"
+              echo "      \"platform\": \"$platform\"," >> "$TEMP_FILE"
+              echo "      \"runner\": \"$runner\"," >> "$TEMP_FILE"
+              echo "      \"java_version\": \"$java_version\"," >> "$TEMP_FILE"
+              echo "      \"repository\": \"$REPO\"," >> "$TEMP_FILE"
+              echo "      \"build_native\": \"$native_build\"," >> "$TEMP_FILE"
+              echo "      \"skip_tests\": \"$SKIP_TESTS\"" >> "$TEMP_FILE"
+              echo "    }" >> "$TEMP_FILE"
               
               ((total_jobs++))
               echo "      Created entry $total_jobs"
