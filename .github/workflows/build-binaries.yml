@@ -80,7 +80,7 @@ jobs:
     - name: Generate Build Matrix
       id: matrix
       run: |
-        set -e
+        set -euo pipefail
         
         echo "=== Generating Build Matrix ==="
         
@@ -100,6 +100,13 @@ jobs:
         echo "Build Native: '$BUILD_NATIVE'"
         echo "Skip Tests: '$SKIP_TESTS'"
         echo ""
+        
+        # Install jq if not available
+        if ! command -v jq >/dev/null 2>&1; then
+          echo "Installing jq..."
+          sudo apt-get update -qq
+          sudo apt-get install -y jq
+        fi
         
         # Function to convert version to branch/tag
         version_to_branch() {
@@ -154,50 +161,65 @@ jobs:
           fi
         }
         
-        # Install jq if not available
-        if ! command -v jq >/dev/null 2>&1; then
-          echo "Installing jq..."
-          sudo apt-get update -qq
-          sudo apt-get install -y jq
-        fi
-        
-        # Generate matrix entries
+        # Process arrays with proper handling of spaces
         echo "=== Processing Arrays ==="
-        IFS=',' read -ra VERSION_ARRAY <<< "$VERSIONS"
-        IFS=',' read -ra PLATFORM_ARRAY <<< "$PLATFORMS"
-        IFS=',' read -ra JAVA_ARRAY <<< "$JAVA_VERSIONS"
+        
+        # Convert comma-separated strings to arrays
+        IFS=',' read -ra VERSION_ARRAY <<< "${VERSIONS// /}"
+        IFS=',' read -ra PLATFORM_ARRAY <<< "${PLATFORMS// /}"
+        IFS=',' read -ra JAVA_ARRAY <<< "${JAVA_VERSIONS// /}"
+        
+        # Clean up array elements (remove leading/trailing spaces)
+        for i in "${!VERSION_ARRAY[@]}"; do
+          VERSION_ARRAY[i]=$(echo "${VERSION_ARRAY[i]}" | xargs)
+        done
+        
+        for i in "${!PLATFORM_ARRAY[@]}"; do
+          PLATFORM_ARRAY[i]=$(echo "${PLATFORM_ARRAY[i]}" | xargs)
+        done
+        
+        for i in "${!JAVA_ARRAY[@]}"; do
+          JAVA_ARRAY[i]=$(echo "${JAVA_ARRAY[i]}" | xargs)
+        done
         
         echo "Version array: ${VERSION_ARRAY[*]}"
         echo "Platform array: ${PLATFORM_ARRAY[*]}"
         echo "Java array: ${JAVA_ARRAY[*]}"
         echo ""
         
-        # Create temporary file for JSON entries
-        TEMP_JSON_FILE=$(mktemp)
-        echo "[]" > "$TEMP_JSON_FILE"
+        # Initialize matrix as empty array
+        matrix_json="[]"
+        total_jobs=0
         
         # Generate matrix entries with prioritization (Windows first)
         echo "=== Generating Matrix Entries ==="
-        total_jobs=0
         
-        # Prioritize Windows builds by processing platforms in order
         for version in "${VERSION_ARRAY[@]}"; do
-          version=$(echo "$version" | xargs)
+          if [[ -z "$version" ]]; then
+            continue
+          fi
+          
           branch=$(version_to_branch "$version")
           echo "Processing version: '$version' -> branch: '$branch'"
           
           for platform in "${PLATFORM_ARRAY[@]}"; do
-            platform=$(echo "$platform" | xargs)
+            if [[ -z "$platform" ]]; then
+              continue
+            fi
+            
             runner=$(get_runner "$platform")
             echo "  Processing platform: '$platform' -> runner: '$runner'"
             
             for java_version in "${JAVA_ARRAY[@]}"; do
-              java_version=$(echo "$java_version" | xargs)
+              if [[ -z "$java_version" ]]; then
+                continue
+              fi
+              
               native_build=$(should_build_native "$platform" "$version" "$BUILD_NATIVE")
               echo "    Processing Java: '$java_version' -> native: '$native_build'"
               
               # Create matrix entry using jq for proper JSON handling
-              NEW_ENTRY=$(jq -n \
+              new_entry=$(jq -n \
                 --arg version "$version" \
                 --arg branch "$branch" \
                 --arg platform "$platform" \
@@ -218,8 +240,7 @@ jobs:
                 }')
               
               # Add entry to array using jq
-              jq --argjson entry "$NEW_ENTRY" '. += [$entry]' "$TEMP_JSON_FILE" > "${TEMP_JSON_FILE}.tmp"
-              mv "${TEMP_JSON_FILE}.tmp" "$TEMP_JSON_FILE"
+              matrix_json=$(echo "$matrix_json" | jq --argjson entry "$new_entry" '. += [$entry]')
               
               ((total_jobs++))
               echo "      Created entry $total_jobs"
@@ -227,30 +248,26 @@ jobs:
           done
         done
         
-        # Read the final matrix
-        matrix_json=$(cat "$TEMP_JSON_FILE")
-        
         echo "Total jobs generated: $total_jobs"
         echo "Matrix JSON preview:"
-        echo "$matrix_json" | jq '.[0] // empty'
+        echo "$matrix_json" | jq '.[0] // empty' || echo "No entries generated"
         
-        # Validate JSON
-        if echo "$matrix_json" | jq empty 2>/dev/null; then
-          echo "✅ Matrix JSON is valid"
-        else
-          echo "❌ Matrix JSON is invalid, using fallback"
+        # Validate JSON and ensure we have at least one job
+        if [[ $total_jobs -eq 0 ]] || ! echo "$matrix_json" | jq empty 2>/dev/null; then
+          echo "❌ No valid matrix entries generated, using fallback"
           matrix_json='[{"version":"3.4.1","branch":"branch-3.4","platform":"windows","runner":"windows-2022","java_version":"11","repository":"https://github.com/apache/hadoop.git","build_native":"false","skip_tests":"true"}]'
           total_jobs=1
+        else
+          echo "✅ Matrix JSON is valid with $total_jobs entries"
         fi
         
-        # Clean up temp file
-        rm -f "$TEMP_JSON_FILE" "${TEMP_JSON_FILE}.tmp"
-        
-        # Output for GitHub
+        # Output for GitHub Actions
         {
           echo "matrix={\"include\":$matrix_json}"
           echo "total-jobs=$total_jobs"
         } >> "$GITHUB_OUTPUT"
+        
+        echo "=== Matrix Generation Complete ==="
 
   # Validation job to check inputs and repository access
   validate-inputs:
@@ -260,7 +277,7 @@ jobs:
     steps:
     - name: Validate Configuration
       run: |
-        set -e
+        set -euo pipefail
         
         echo "=== Validating Build Configuration ==="
         echo "Total jobs to run: ${{ needs.prepare-matrix.outputs.total-jobs }}"
@@ -269,12 +286,13 @@ jobs:
         REPO="${{ github.event.inputs.hadoop_repo || env.DEFAULT_REPO }}"
         echo "Validating repository access: $REPO"
         
-        # Check repository accessibility
-        if git ls-remote --heads "$REPO" >/dev/null 2>&1; then
+        # Check repository accessibility with timeout
+        if timeout 30s git ls-remote --heads "$REPO" >/dev/null 2>&1; then
           echo "✅ Repository access validated"
         else
-          echo "❌ Repository access failed"
-          exit 1
+          echo "❌ Repository access failed or timed out"
+          echo "This may cause builds to fail. Please check the repository URL."
+          # Don't fail validation for repository issues - let builds handle it
         fi
         
         # Check job limits
@@ -283,6 +301,7 @@ jobs:
         
         if [[ $TOTAL_JOBS -gt $MAX_JOBS ]]; then
           echo "⚠️ Warning: $TOTAL_JOBS jobs requested, but limit is $MAX_JOBS"
+          echo "Jobs will be queued and run in batches."
         fi
         
         echo "✅ Configuration validation completed"
@@ -313,6 +332,8 @@ jobs:
     - name: Setup Build Environment
       shell: bash
       run: |
+        set -euo pipefail
+        
         echo "=== Setting up Build Environment ==="
         echo "Platform: ${{ matrix.platform }}"
         echo "Runner: ${{ matrix.runner }}"
@@ -396,6 +417,8 @@ jobs:
     - name: Set up Build Tools (Ubuntu)
       if: matrix.platform == 'ubuntu'
       run: |
+        set -euo pipefail
+        
         echo "=== Setting up Ubuntu Build Tools ==="
         
         # Update package lists
@@ -430,6 +453,8 @@ jobs:
     - name: Validate Build Environment
       shell: bash
       run: |
+        set -euo pipefail
+        
         echo "=== Validating Build Environment ==="
         
         echo "System Information:"
@@ -466,19 +491,39 @@ jobs:
     - name: Clone Hadoop Repository
       shell: bash
       run: |
+        set -euo pipefail
+        
         echo "=== Cloning Hadoop Repository ==="
         echo "Repository: $HADOOP_REPO"
         echo "Branch: $HADOOP_BRANCH"
         echo "Target: $BUILD_DIR"
         
-        # Clone with optimized settings
-        git clone \
-          --depth 50 \
-          --branch "$HADOOP_BRANCH" \
-          --single-branch \
-          --filter=blob:none \
-          "$HADOOP_REPO" \
-          "$BUILD_DIR"
+        # Clone with optimized settings and retry logic
+        max_attempts=3
+        attempt=1
+        
+        while [ $attempt -le $max_attempts ]; do
+          echo "Attempt $attempt of $max_attempts..."
+          
+          if git clone \
+            --depth 50 \
+            --branch "$HADOOP_BRANCH" \
+            --single-branch \
+            --filter=blob:none \
+            "$HADOOP_REPO" \
+            "$BUILD_DIR"; then
+            break
+          fi
+          
+          if [ $attempt -eq $max_attempts ]; then
+            echo "❌ Failed to clone repository after $max_attempts attempts"
+            exit 1
+          fi
+          
+          ((attempt++))
+          echo "Retrying in 10 seconds..."
+          sleep 10
+        done
         
         cd "$BUILD_DIR"
         
@@ -493,6 +538,8 @@ jobs:
       shell: bash
       working-directory: ${{ env.BUILD_DIR }}
       run: |
+        set -euo pipefail
+        
         echo "=== Detecting Hadoop Version ==="
         
         VERSION=""
@@ -532,6 +579,8 @@ jobs:
       shell: bash
       working-directory: ${{ env.BUILD_DIR }}
       run: |
+        set -euo pipefail
+        
         echo "=== Building Hadoop ${{ env.DETECTED_HADOOP_VERSION }} ==="
         
         # Set build flags
@@ -625,6 +674,8 @@ jobs:
       shell: bash
       working-directory: ${{ env.BUILD_DIR }}
       run: |
+        set -euo pipefail
+        
         echo "=== Running Hadoop Tests ==="
         
         # Run essential tests only to avoid timeouts
@@ -655,6 +706,8 @@ jobs:
       shell: bash
       working-directory: ${{ env.BUILD_DIR }}
       run: |
+        set -euo pipefail
+        
         echo "=== Analyzing Build Artifacts ==="
         
         ARTIFACTS_FOUND=false
@@ -697,6 +750,8 @@ jobs:
       shell: bash
       working-directory: ${{ env.BUILD_DIR }}
       run: |
+        set -euo pipefail
+        
         echo "=== Generating Build Report ==="
         
         BUILD_STATUS="${BUILD_STATUS:-unknown}"
@@ -704,7 +759,7 @@ jobs:
         ARTIFACTS_FOUND="${ARTIFACTS_FOUND:-false}"
         NATIVE_LIBS_FOUND="${NATIVE_LIBS_FOUND:-false}"
         
-        cat > build-report.md << 'EOF'
+        cat > build-report.md << EOF
         # Hadoop Build Report
         
         **Version**: ${{ env.DETECTED_HADOOP_VERSION }}
@@ -769,10 +824,6 @@ jobs:
         esac)
         EOF
         
-        # Evaluate variables in the report
-        envsubst < build-report.md > build-report-final.md
-        mv build-report-final.md build-report.md
-        
         echo "✅ Build report generated"
 
     - name: Upload Build Artifacts
@@ -816,6 +867,8 @@ jobs:
     - name: Collect Build Results
       id: collect-results
       run: |
+        set -euo pipefail
+        
         echo "=== Collecting Build Results ==="
         
         # Initialize counters
@@ -836,6 +889,8 @@ jobs:
     
     - name: Generate Overall Summary
       run: |
+        set -euo pipefail
+        
         echo "=== Multi-Version Hadoop Build Summary ===" >> "$GITHUB_STEP_SUMMARY"
         echo "" >> "$GITHUB_STEP_SUMMARY"
         echo "**Total Jobs**: ${{ needs.prepare-matrix.outputs.total-jobs }}" >> "$GITHUB_STEP_SUMMARY"
@@ -902,6 +957,8 @@ jobs:
     - name: Check Critical Failures
       if: needs.build-hadoop.result == 'failure'
       run: |
+        set -euo pipefail
+        
         echo "=== Checking for Critical Failures ==="
         echo "Some builds failed. Please review the individual job logs for details."
         echo "This is normal for complex multi-platform builds like Hadoop."
