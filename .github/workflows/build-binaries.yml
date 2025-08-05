@@ -80,7 +80,7 @@ jobs:
     - name: Generate Build Matrix
       id: matrix
       run: |
-        set -euo pipefail
+        set -e
         
         echo "=== Generating Build Matrix ==="
         
@@ -164,37 +164,28 @@ jobs:
         # Process arrays with proper handling of spaces
         echo "=== Processing Arrays ==="
         
-        # Convert comma-separated strings to arrays
-        IFS=',' read -ra VERSION_ARRAY <<< "${VERSIONS// /}"
-        IFS=',' read -ra PLATFORM_ARRAY <<< "${PLATFORMS// /}"
-        IFS=',' read -ra JAVA_ARRAY <<< "${JAVA_VERSIONS// /}"
+        # Convert comma-separated strings to arrays - simpler approach
+        VERSIONS_CLEAN=$(echo "$VERSIONS" | tr ',' ' ')
+        PLATFORMS_CLEAN=$(echo "$PLATFORMS" | tr ',' ' ')
+        JAVA_VERSIONS_CLEAN=$(echo "$JAVA_VERSIONS" | tr ',' ' ')
         
-        # Clean up array elements (remove leading/trailing spaces)
-        for i in "${!VERSION_ARRAY[@]}"; do
-          VERSION_ARRAY[i]=$(echo "${VERSION_ARRAY[i]}" | xargs)
-        done
-        
-        for i in "${!PLATFORM_ARRAY[@]}"; do
-          PLATFORM_ARRAY[i]=$(echo "${PLATFORM_ARRAY[i]}" | xargs)
-        done
-        
-        for i in "${!JAVA_ARRAY[@]}"; do
-          JAVA_ARRAY[i]=$(echo "${JAVA_ARRAY[i]}" | xargs)
-        done
-        
-        echo "Version array: ${VERSION_ARRAY[*]}"
-        echo "Platform array: ${PLATFORM_ARRAY[*]}"
-        echo "Java array: ${JAVA_ARRAY[*]}"
+        echo "Version array: $VERSIONS_CLEAN"
+        echo "Platform array: $PLATFORMS_CLEAN"
+        echo "Java array: $JAVA_VERSIONS_CLEAN"
         echo ""
         
-        # Initialize matrix as empty array
-        matrix_json="[]"
-        total_jobs=0
+        # Create temporary file for building JSON manually
+        TEMP_FILE=$(mktemp)
+        echo "[" > "$TEMP_FILE"
         
-        # Generate matrix entries with prioritization (Windows first)
+        total_jobs=0
+        first_entry=true
+        
+        # Generate matrix entries - simplified approach
         echo "=== Generating Matrix Entries ==="
         
-        for version in "${VERSION_ARRAY[@]}"; do
+        for version in $VERSIONS_CLEAN; do
+          version=$(echo "$version" | xargs)  # trim whitespace
           if [[ -z "$version" ]]; then
             continue
           fi
@@ -202,7 +193,8 @@ jobs:
           branch=$(version_to_branch "$version")
           echo "Processing version: '$version' -> branch: '$branch'"
           
-          for platform in "${PLATFORM_ARRAY[@]}"; do
+          for platform in $PLATFORMS_CLEAN; do
+            platform=$(echo "$platform" | xargs)  # trim whitespace
             if [[ -z "$platform" ]]; then
               continue
             fi
@@ -210,7 +202,8 @@ jobs:
             runner=$(get_runner "$platform")
             echo "  Processing platform: '$platform' -> runner: '$runner'"
             
-            for java_version in "${JAVA_ARRAY[@]}"; do
+            for java_version in $JAVA_VERSIONS_CLEAN; do
+              java_version=$(echo "$java_version" | xargs)  # trim whitespace
               if [[ -z "$java_version" ]]; then
                 continue
               fi
@@ -218,29 +211,24 @@ jobs:
               native_build=$(should_build_native "$platform" "$version" "$BUILD_NATIVE")
               echo "    Processing Java: '$java_version' -> native: '$native_build'"
               
-              # Create matrix entry using jq for proper JSON handling
-              new_entry=$(jq -n \
-                --arg version "$version" \
-                --arg branch "$branch" \
-                --arg platform "$platform" \
-                --arg runner "$runner" \
-                --arg java_version "$java_version" \
-                --arg repository "$REPO" \
-                --arg build_native "$native_build" \
-                --arg skip_tests "$SKIP_TESTS" \
-                '{
-                  version: $version,
-                  branch: $branch,
-                  platform: $platform,
-                  runner: $runner,
-                  java_version: $java_version,
-                  repository: $repository,
-                  build_native: $build_native,
-                  skip_tests: $skip_tests
-                }')
+              # Add comma separator if not first entry
+              if [[ "$first_entry" != "true" ]]; then
+                echo "," >> "$TEMP_FILE"
+              fi
+              first_entry=false
               
-              # Add entry to array using jq
-              matrix_json=$(echo "$matrix_json" | jq --argjson entry "$new_entry" '. += [$entry]')
+              # Create JSON object manually to avoid jq issues
+              cat >> "$TEMP_FILE" << EOF
+    {
+      "version": "$version",
+      "branch": "$branch",
+      "platform": "$platform",
+      "runner": "$runner",
+      "java_version": "$java_version",
+      "repository": "$REPO",
+      "build_native": "$native_build",
+      "skip_tests": "$SKIP_TESTS"
+    }EOF
               
               ((total_jobs++))
               echo "      Created entry $total_jobs"
@@ -248,9 +236,15 @@ jobs:
           done
         done
         
+        echo "]" >> "$TEMP_FILE"
+        
+        # Read the generated JSON
+        matrix_json=$(cat "$TEMP_FILE")
+        rm -f "$TEMP_FILE"
+        
         echo "Total jobs generated: $total_jobs"
         echo "Matrix JSON preview:"
-        echo "$matrix_json" | jq '.[0] // empty' || echo "No entries generated"
+        echo "$matrix_json" | jq '.[0] // empty' 2>/dev/null || echo "Could not preview JSON"
         
         # Validate JSON and ensure we have at least one job
         if [[ $total_jobs -eq 0 ]] || ! echo "$matrix_json" | jq empty 2>/dev/null; then
@@ -261,9 +255,12 @@ jobs:
           echo "✅ Matrix JSON is valid with $total_jobs entries"
         fi
         
+        # Escape the JSON properly for GitHub Actions output
+        matrix_output=$(echo "$matrix_json" | jq -c .)
+        
         # Output for GitHub Actions
         {
-          echo "matrix={\"include\":$matrix_json}"
+          echo "matrix={\"include\":$matrix_output}"
           echo "total-jobs=$total_jobs"
         } >> "$GITHUB_OUTPUT"
         
@@ -760,69 +757,69 @@ jobs:
         NATIVE_LIBS_FOUND="${NATIVE_LIBS_FOUND:-false}"
         
         cat > build-report.md << EOF
-        # Hadoop Build Report
-        
-        **Version**: ${{ env.DETECTED_HADOOP_VERSION }}
-        **Platform**: ${{ matrix.platform }}
-        **Java Version**: ${{ matrix.java_version }}
-        **Build Status**: ${BUILD_STATUS}
-        **Test Status**: ${TEST_STATUS}
-        **Timestamp**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-        
-        ## Configuration
-        - **Repository**: ${{ matrix.repository }}
-        - **Branch**: ${{ matrix.branch }}
-        - **Commit**: ${{ env.HADOOP_COMMIT }}
-        - **Native Build**: ${{ matrix.build_native }}
-        - **Skip Tests**: ${{ matrix.skip_tests }}
-        
-        ## Results
-        - **Build**: $(case "$BUILD_STATUS" in
-          success) echo "✅ SUCCESS" ;;
-          partial_success) echo "⚠️ PARTIAL SUCCESS" ;;
-          timeout) echo "⏰ TIMEOUT" ;;
-          *) echo "❌ FAILED" ;;
-        esac)
-        - **Tests**: $(case "$TEST_STATUS" in
-          passed) echo "✅ PASSED" ;;
-          failed) echo "⚠️ SOME FAILED" ;;
-          timeout) echo "⏰ TIMEOUT" ;;
-          *) echo "⏭️ SKIPPED" ;;
-        esac)
-        - **Artifacts**: $(if [[ "$ARTIFACTS_FOUND" == "true" ]]; then echo "✅ CREATED"; else echo "❌ MISSING"; fi)
-        - **Native Libs**: $(if [[ "$NATIVE_LIBS_FOUND" == "true" ]]; then echo "✅ PRESENT"; else echo "❌ NOT FOUND"; fi)
-        
-        ## Platform Notes
-        $(case "${{ matrix.platform }}" in
-          windows) echo "- Windows builds may have limited native library support" ;;
-          macos) echo "- macOS builds require Xcode command line tools" ;;
-          ubuntu) echo "- Linux builds have the best native library support" ;;
-        esac)
-        
-        ## Next Steps
-        $(case "$BUILD_STATUS" in
-          success)
-            echo "1. Download and extract the distribution artifacts"
-            echo "2. Configure HADOOP_HOME and PATH variables"
-            echo "3. Test the installation in your target environment"
-            ;;
-          partial_success)
-            echo "1. Review build logs for specific module failures"
-            echo "2. Consider using available artifacts for development"
-            echo "3. Report any critical issues to the Hadoop community"
-            ;;
-          timeout)
-            echo "1. Consider reducing the scope of the build"
-            echo "2. Build individual modules separately"
-            echo "3. Use a more powerful runner if available"
-            ;;
-          *)
-            echo "1. Review detailed build logs for error analysis"
-            echo "2. Check system requirements and dependencies"
-            echo "3. Consider building on a different platform"
-            ;;
-        esac)
-        EOF
+# Hadoop Build Report
+
+**Version**: ${{ env.DETECTED_HADOOP_VERSION }}
+**Platform**: ${{ matrix.platform }}
+**Java Version**: ${{ matrix.java_version }}
+**Build Status**: ${BUILD_STATUS}
+**Test Status**: ${TEST_STATUS}
+**Timestamp**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+## Configuration
+- **Repository**: ${{ matrix.repository }}
+- **Branch**: ${{ matrix.branch }}
+- **Commit**: ${{ env.HADOOP_COMMIT }}
+- **Native Build**: ${{ matrix.build_native }}
+- **Skip Tests**: ${{ matrix.skip_tests }}
+
+## Results
+- **Build**: $(case "$BUILD_STATUS" in
+  success) echo "✅ SUCCESS" ;;
+  partial_success) echo "⚠️ PARTIAL SUCCESS" ;;
+  timeout) echo "⏰ TIMEOUT" ;;
+  *) echo "❌ FAILED" ;;
+esac)
+- **Tests**: $(case "$TEST_STATUS" in
+  passed) echo "✅ PASSED" ;;
+  failed) echo "⚠️ SOME FAILED" ;;
+  timeout) echo "⏰ TIMEOUT" ;;
+  *) echo "⏭️ SKIPPED" ;;
+esac)
+- **Artifacts**: $(if [[ "$ARTIFACTS_FOUND" == "true" ]]; then echo "✅ CREATED"; else echo "❌ MISSING"; fi)
+- **Native Libs**: $(if [[ "$NATIVE_LIBS_FOUND" == "true" ]]; then echo "✅ PRESENT"; else echo "❌ NOT FOUND"; fi)
+
+## Platform Notes
+$(case "${{ matrix.platform }}" in
+  windows) echo "- Windows builds may have limited native library support" ;;
+  macos) echo "- macOS builds require Xcode command line tools" ;;
+  ubuntu) echo "- Linux builds have the best native library support" ;;
+esac)
+
+## Next Steps
+$(case "$BUILD_STATUS" in
+  success)
+    echo "1. Download and extract the distribution artifacts"
+    echo "2. Configure HADOOP_HOME and PATH variables"
+    echo "3. Test the installation in your target environment"
+    ;;
+  partial_success)
+    echo "1. Review build logs for specific module failures"
+    echo "2. Consider using available artifacts for development"
+    echo "3. Report any critical issues to the Hadoop community"
+    ;;
+  timeout)
+    echo "1. Consider reducing the scope of the build"
+    echo "2. Build individual modules separately"
+    echo "3. Use a more powerful runner if available"
+    ;;
+  *)
+    echo "1. Review detailed build logs for error analysis"
+    echo "2. Check system requirements and dependencies"
+    echo "3. Consider building on a different platform"
+    ;;
+esac)
+EOF
         
         echo "✅ Build report generated"
 
