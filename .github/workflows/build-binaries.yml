@@ -97,57 +97,57 @@ jobs:
         
         # Generate dynamic matrix
         python3 << 'EOF'
-import json
-import os
-
-versions = os.environ['VERSIONS'].split(',')
-platforms = os.environ['PLATFORMS'].split(',')
-java_versions = os.environ['JAVA_VERSIONS'].split(',')
-repo = os.environ['REPO']
-build_native = os.environ['BUILD_NATIVE']
-skip_tests = os.environ['SKIP_TESTS']
-
-# Platform mappings
-platform_map = {
-    'windows': {'runner': 'windows-2022', 'branch_map': {'3.4.1': 'branch-3.4', '3.3.6': 'branch-3.3', 'trunk': 'trunk'}},
-    'ubuntu': {'runner': 'ubuntu-22.04', 'branch_map': {'3.4.1': 'branch-3.4', '3.3.6': 'branch-3.3', 'trunk': 'trunk'}},
-    'macos': {'runner': 'macos-13', 'branch_map': {'3.4.1': 'branch-3.4', '3.3.6': 'branch-3.3', 'trunk': 'trunk'}}
-}
-
-matrix = []
-for version in versions:
-    version = version.strip()
-    for platform in platforms:
-        platform = platform.strip()
-        for java_version in java_versions:
-            java_version = java_version.strip()
-            
-            if platform in platform_map:
-                branch = platform_map[platform]['branch_map'].get(version, 'trunk')
-                runner = platform_map[platform]['runner']
-                
-                matrix.append({
-                    'version': version,
-                    'branch': branch,
-                    'platform': platform,
-                    'runner': runner,
-                    'java_version': java_version,
-                    'repository': repo,
-                    'build_native': build_native,
-                    'skip_tests': skip_tests
-                })
-
-# Write matrix to GitHub output
-matrix_json = json.dumps({"include": matrix}, separators=(',', ':'))
-print(f"Generated {len(matrix)} jobs")
-
-with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-    f.write(f"matrix={matrix_json}\n")
-    f.write(f"total-jobs={len(matrix)}\n")
-
-print("Matrix JSON:")
-print(json.dumps(matrix, indent=2))
-EOF
+        import json
+        import os
+        
+        versions = os.environ['VERSIONS'].split(',')
+        platforms = os.environ['PLATFORMS'].split(',')
+        java_versions = os.environ['JAVA_VERSIONS'].split(',')
+        repo = os.environ['REPO']
+        build_native = os.environ['BUILD_NATIVE']
+        skip_tests = os.environ['SKIP_TESTS']
+        
+        # Platform mappings
+        platform_map = {
+            'windows': {'runner': 'windows-2022', 'branch_map': {'3.4.1': 'branch-3.4', '3.3.6': 'branch-3.3', 'trunk': 'trunk'}},
+            'ubuntu': {'runner': 'ubuntu-22.04', 'branch_map': {'3.4.1': 'branch-3.4', '3.3.6': 'branch-3.3', 'trunk': 'trunk'}},
+            'macos': {'runner': 'macos-13', 'branch_map': {'3.4.1': 'branch-3.4', '3.3.6': 'branch-3.3', 'trunk': 'trunk'}}
+        }
+        
+        matrix = []
+        for version in versions:
+            version = version.strip()
+            for platform in platforms:
+                platform = platform.strip()
+                for java_version in java_versions:
+                    java_version = java_version.strip()
+                    
+                    if platform in platform_map:
+                        branch = platform_map[platform]['branch_map'].get(version, 'trunk')
+                        runner = platform_map[platform]['runner']
+                        
+                        matrix.append({
+                            'version': version,
+                            'branch': branch,
+                            'platform': platform,
+                            'runner': runner,
+                            'java_version': java_version,
+                            'repository': repo,
+                            'build_native': build_native,
+                            'skip_tests': skip_tests
+                        })
+        
+        # Write matrix to GitHub output
+        matrix_json = json.dumps({"include": matrix}, separators=(',', ':'))
+        print(f"Generated {len(matrix)} jobs")
+        
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write(f"matrix={matrix_json}\n")
+            f.write(f"total-jobs={len(matrix)}\n")
+        
+        print("Matrix JSON:")
+        print(json.dumps(matrix, indent=2))
+        EOF
 
   # Validation job to check inputs and repository access
   validate-inputs:
