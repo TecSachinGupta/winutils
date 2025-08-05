@@ -95,57 +95,59 @@ jobs:
         echo "Platforms: $PLATFORMS"
         echo "Java Versions: $JAVA_VERSIONS"
         
-        # Create a simple static matrix for now to get it working
-        # We'll expand this once the basic structure works
-        
-        # Convert versions string to determine count
-        VERSION_COUNT=$(echo "$VERSIONS" | tr ',' '\n' | wc -l)
-        PLATFORM_COUNT=$(echo "$PLATFORMS" | tr ',' '\n' | wc -l)
-        JAVA_COUNT=$(echo "$JAVA_VERSIONS" | tr ',' '\n' | wc -l)
-        TOTAL_JOBS=$((VERSION_COUNT * PLATFORM_COUNT * JAVA_COUNT))
-        
-        echo "Will generate $TOTAL_JOBS jobs"
-        
-        # Create basic matrix - simplified approach
-        if [[ "$PLATFORMS" == *"windows"* ]]; then
-          if [[ "$PLATFORMS" == *"ubuntu"* ]]; then
-            # Both Windows and Ubuntu
-            MATRIX='[{"version":"3.4.1","branch":"branch-3.4","platform":"windows","runner":"windows-2022","java_version":"11","repository":"'"$REPO"'","build_native":"false","skip_tests":"'"$SKIP_TESTS"'"},{"version":"3.4.1","branch":"branch-3.4","platform":"ubuntu","runner":"ubuntu-22.04","java_version":"11","repository":"'"$REPO"'","build_native":"false","skip_tests":"'"$SKIP_TESTS"'"}]'
-          else
-            # Windows only
-            MATRIX='[{"version":"3.4.1","branch":"branch-3.4","platform":"windows","runner":"windows-2022","java_version":"11","repository":"'"$REPO"'","build_native":"false","skip_tests":"'"$SKIP_TESTS"'"}]'
-          fi
-        else
-          # Ubuntu only
-          MATRIX='[{"version":"3.4.1","branch":"branch-3.4","platform":"ubuntu","runner":"ubuntu-22.04","java_version":"11","repository":"'"$REPO"'","build_native":"false","skip_tests":"'"$SKIP_TESTS"'"}]'
-        fi
-        
-        # Add second version if specified
-        if [[ "$VERSIONS" == *"3.3.6"* ]]; then
-          # For now, just use the single version to avoid complexity
-          echo "Note: Multiple versions detected, but using simplified matrix for stability"
-        fi
-        
-        echo "Generated matrix:"
-        echo "$MATRIX"
-        
-        # Validate JSON
-        if echo "$MATRIX" | python3 -m json.tool >/dev/null 2>&1; then
-          echo "✅ Matrix JSON is valid"
-          JOBS_COUNT=$(echo "$MATRIX" | python3 -c "import sys, json; print(len(json.load(sys.stdin)))")
-        else
-          echo "❌ Matrix JSON is invalid, using single job fallback"
-          MATRIX='[{"version":"3.4.1","branch":"branch-3.4","platform":"windows","runner":"windows-2022","java_version":"11","repository":"'"$REPO"'","build_native":"false","skip_tests":"true"}]'
-          JOBS_COUNT=1
-        fi
-        
-        # Output for GitHub Actions - ensure proper escaping
-        MATRIX_COMPACT=$(echo "$MATRIX" | tr -d '\n' | tr -d ' ')
-        echo "matrix={\"include\":$MATRIX_COMPACT}" >> "$GITHUB_OUTPUT"
-        echo "total-jobs=$JOBS_COUNT" >> "$GITHUB_OUTPUT"
-        
-        echo "=== Matrix Generation Complete ==="
-        echo "Total jobs: $JOBS_COUNT"
+        # Generate dynamic matrix
+        python3 << 'EOF'
+import json
+import os
+
+versions = os.environ['VERSIONS'].split(',')
+platforms = os.environ['PLATFORMS'].split(',')
+java_versions = os.environ['JAVA_VERSIONS'].split(',')
+repo = os.environ['REPO']
+build_native = os.environ['BUILD_NATIVE']
+skip_tests = os.environ['SKIP_TESTS']
+
+# Platform mappings
+platform_map = {
+    'windows': {'runner': 'windows-2022', 'branch_map': {'3.4.1': 'branch-3.4', '3.3.6': 'branch-3.3', 'trunk': 'trunk'}},
+    'ubuntu': {'runner': 'ubuntu-22.04', 'branch_map': {'3.4.1': 'branch-3.4', '3.3.6': 'branch-3.3', 'trunk': 'trunk'}},
+    'macos': {'runner': 'macos-13', 'branch_map': {'3.4.1': 'branch-3.4', '3.3.6': 'branch-3.3', 'trunk': 'trunk'}}
+}
+
+matrix = []
+for version in versions:
+    version = version.strip()
+    for platform in platforms:
+        platform = platform.strip()
+        for java_version in java_versions:
+            java_version = java_version.strip()
+            
+            if platform in platform_map:
+                branch = platform_map[platform]['branch_map'].get(version, 'trunk')
+                runner = platform_map[platform]['runner']
+                
+                matrix.append({
+                    'version': version,
+                    'branch': branch,
+                    'platform': platform,
+                    'runner': runner,
+                    'java_version': java_version,
+                    'repository': repo,
+                    'build_native': build_native,
+                    'skip_tests': skip_tests
+                })
+
+# Write matrix to GitHub output
+matrix_json = json.dumps({"include": matrix}, separators=(',', ':'))
+print(f"Generated {len(matrix)} jobs")
+
+with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+    f.write(f"matrix={matrix_json}\n")
+    f.write(f"total-jobs={len(matrix)}\n")
+
+print("Matrix JSON:")
+print(json.dumps(matrix, indent=2))
+EOF
 
   # Validation job to check inputs and repository access
   validate-inputs:
@@ -204,7 +206,8 @@ jobs:
       BUILD_NATIVE: ${{ matrix.build_native }}
       SKIP_TESTS: ${{ matrix.skip_tests }}
       PLATFORM: ${{ matrix.platform }}
-      BUILD_DIR: ${{ github.workspace }}/hadoop-build-${{ matrix.version }}-${{ matrix.platform }}-java${{ matrix.java_version }}
+      # Fix: Use runner temp directory instead of workspace subdirectory
+      BUILD_DIR: ${{ runner.temp }}/hadoop-build-${{ matrix.version }}-${{ matrix.platform }}-java${{ matrix.java_version }}
     
     steps:
     - name: Setup Build Environment
@@ -256,7 +259,7 @@ jobs:
       with:
         java-version: ${{ matrix.java_version }}
         distribution: 'temurin'
-        cache: maven
+        # Fix: Don't cache Maven here since we'll do it manually after checkout
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -387,7 +390,6 @@ jobs:
             --depth 50 \
             --branch "$HADOOP_BRANCH" \
             --single-branch \
-            --filter=blob:none \
             "$HADOOP_REPO" \
             "$BUILD_DIR"; then
             break
@@ -440,13 +442,14 @@ jobs:
         echo "DETECTED_HADOOP_VERSION=$VERSION" >> "$GITHUB_ENV"
         echo "✅ Detected Hadoop Version: $VERSION"
 
+    # Fix: Cache Maven dependencies after repository is cloned
     - name: Cache Maven Dependencies
       uses: actions/cache@v4
       with:
         path: |
           ~/.m2/repository
           !~/.m2/repository/org/apache/hadoop
-        key: ${{ runner.os }}-maven-java${{ matrix.java_version }}-hadoop-${{ env.DETECTED_HADOOP_VERSION }}-${{ hashFiles('**/pom.xml') }}
+        key: ${{ runner.os }}-maven-java${{ matrix.java_version }}-hadoop-${{ env.DETECTED_HADOOP_VERSION }}-${{ hashFiles(format('{0}/**/pom.xml', env.BUILD_DIR)) }}
         restore-keys: |
           ${{ runner.os }}-maven-java${{ matrix.java_version }}-hadoop-${{ env.DETECTED_HADOOP_VERSION }}-
           ${{ runner.os }}-maven-java${{ matrix.java_version }}-hadoop-
