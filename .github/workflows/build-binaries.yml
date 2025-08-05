@@ -108,55 +108,16 @@ jobs:
         
         # Create basic matrix - simplified approach
         if [[ "$PLATFORMS" == *"windows"* ]]; then
-          MATRIX='[
-            {
-              "version": "3.4.1",
-              "branch": "branch-3.4",
-              "platform": "windows",
-              "runner": "windows-2022",
-              "java_version": "11",
-              "repository": "'"$REPO"'",
-              "build_native": "false",
-              "skip_tests": "'"$SKIP_TESTS"'"
-            }
-          ]'
           if [[ "$PLATFORMS" == *"ubuntu"* ]]; then
-            MATRIX='[
-              {
-                "version": "3.4.1",
-                "branch": "branch-3.4",
-                "platform": "windows",
-                "runner": "windows-2022",
-                "java_version": "11",
-                "repository": "'"$REPO"'",
-                "build_native": "false",
-                "skip_tests": "'"$SKIP_TESTS"'"
-              },
-              {
-                "version": "3.4.1",
-                "branch": "branch-3.4",
-                "platform": "ubuntu",
-                "runner": "ubuntu-22.04",
-                "java_version": "11",
-                "repository": "'"$REPO"'",
-                "build_native": "false",
-                "skip_tests": "'"$SKIP_TESTS"'"
-              }
-            ]'
+            # Both Windows and Ubuntu
+            MATRIX='[{"version":"3.4.1","branch":"branch-3.4","platform":"windows","runner":"windows-2022","java_version":"11","repository":"'"$REPO"'","build_native":"false","skip_tests":"'"$SKIP_TESTS"'"},{"version":"3.4.1","branch":"branch-3.4","platform":"ubuntu","runner":"ubuntu-22.04","java_version":"11","repository":"'"$REPO"'","build_native":"false","skip_tests":"'"$SKIP_TESTS"'"}]'
+          else
+            # Windows only
+            MATRIX='[{"version":"3.4.1","branch":"branch-3.4","platform":"windows","runner":"windows-2022","java_version":"11","repository":"'"$REPO"'","build_native":"false","skip_tests":"'"$SKIP_TESTS"'"}]'
           fi
         else
-          MATRIX='[
-            {
-              "version": "3.4.1",
-              "branch": "branch-3.4",
-              "platform": "ubuntu",
-              "runner": "ubuntu-22.04",
-              "java_version": "11",
-              "repository": "'"$REPO"'",
-              "build_native": "false",
-              "skip_tests": "'"$SKIP_TESTS"'"
-            }
-          ]'
+          # Ubuntu only
+          MATRIX='[{"version":"3.4.1","branch":"branch-3.4","platform":"ubuntu","runner":"ubuntu-22.04","java_version":"11","repository":"'"$REPO"'","build_native":"false","skip_tests":"'"$SKIP_TESTS"'"}]'
         fi
         
         # Add second version if specified
@@ -178,8 +139,9 @@ jobs:
           JOBS_COUNT=1
         fi
         
-        # Output for GitHub Actions
-        echo "matrix={\"include\":$MATRIX}" >> "$GITHUB_OUTPUT"
+        # Output for GitHub Actions - ensure proper escaping
+        MATRIX_COMPACT=$(echo "$MATRIX" | tr -d '\n' | tr -d ' ')
+        echo "matrix={\"include\":$MATRIX_COMPACT}" >> "$GITHUB_OUTPUT"
         echo "total-jobs=$JOBS_COUNT" >> "$GITHUB_OUTPUT"
         
         echo "=== Matrix Generation Complete ==="
