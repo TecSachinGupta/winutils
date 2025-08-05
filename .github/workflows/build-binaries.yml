@@ -1,9 +1,4 @@
-echo "### Troubleshooting" >> "$GITHUB_STEP_SUMMARY"
-        echo "- **Build Failures**: Check build logs for specific error messages" >> "$GITHUB_STEP_SUMMARY"
-        echo "- **Timeouts**: Consider reducing parallel jobs or building fewer versions" >> "$GITHUB_STEP_SUMMARY"
-        echo "- **Native Builds**: Linux provides the most reliable native compilation" >> "$GITHUB_STEP_SUMMARY"
-        echo "- **Windows Issues**: Use WSL2 or Linux containers for better compatibility" >> "$GITHUB_STEP_SUMMARY"
-        echo "" >> "$GITHUB_STEP_SUMMARY"name: Multi-Version Hadoop Build Pipeline
+name: Multi-Version Hadoop Build Pipeline
 
 on:
   push:
@@ -32,6 +27,7 @@ on:
           - 'ubuntu,macos'
           - 'windows,macos'
           - 'ubuntu,windows,macos'
+          - 'windows,ubuntu'
       java_versions:
         description: 'Java versions (comma-separated, e.g., "8,11,17")'
         required: false
@@ -76,7 +72,7 @@ env:
 jobs:
   # Job to parse inputs and create build matrix
   prepare-matrix:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       total-jobs: ${{ steps.matrix.outputs.total-jobs }}
@@ -882,7 +878,6 @@ jobs:
         echo "4. **Report issues** to the Hadoop community if needed" >> "$GITHUB_STEP_SUMMARY"
         echo "" >> "$GITHUB_STEP_SUMMARY"
         
-        # Add troubleshooting section
         echo "### Manual Re-run Instructions" >> "$GITHUB_STEP_SUMMARY"
         echo "To manually re-run specific builds:" >> "$GITHUB_STEP_SUMMARY"
         echo '```bash' >> "$GITHUB_STEP_SUMMARY"
@@ -895,6 +890,13 @@ jobs:
         echo "#    - Java Versions: 11,17 (for multiple Java versions)" >> "$GITHUB_STEP_SUMMARY"
         echo "#    - Build Native: true (if needed)" >> "$GITHUB_STEP_SUMMARY"
         echo '```' >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        
+        echo "### Troubleshooting" >> "$GITHUB_STEP_SUMMARY"
+        echo "- **Build Failures**: Check build logs for specific error messages" >> "$GITHUB_STEP_SUMMARY"
+        echo "- **Timeouts**: Consider reducing parallel jobs or building fewer versions" >> "$GITHUB_STEP_SUMMARY"
+        echo "- **Native Builds**: Linux provides the most reliable native compilation" >> "$GITHUB_STEP_SUMMARY"
+        echo "- **Windows Issues**: Use WSL2 or Linux containers for better compatibility" >> "$GITHUB_STEP_SUMMARY"
         echo "" >> "$GITHUB_STEP_SUMMARY"
 
     - name: Check Critical Failures
